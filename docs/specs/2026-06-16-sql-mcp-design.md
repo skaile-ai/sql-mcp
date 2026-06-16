@@ -22,7 +22,7 @@ pattern than the Java/POI servers.
 | 3 | Capability scope | **Configurable per instance** — `readonly` / `dml` / `full`. |
 | 4 | Credentials | **Existing workspace secret injection** (`env:` refs via `SecretProviderChain`, or `auth: backend` via the platform `tokenMediator`). No bespoke credential handling. Preconfiguration via **presets**. |
 | 5 | Runtime | **Node / TypeScript.** Pure-JS drivers + Node 24 built-in `node:sqlite`. |
-| 6 | Connections per instance | **One connection per instance.** Multiple DBs = multiple `mcp:sql` instances. |
+| 6 | Database per instance | **One database/DSN per instance**, backed by a small pool. Tools take no connection arg; multiple DBs = multiple `mcp:sql` instances. |
 | 7 | Packaging / delivery | **No Nix recipe.** Bundle to a single `server.js`; ship as an `upstream_pointer` GitHub-release asset; run on the baseline `node`. |
 | 8 | Access enforcement | **Defense in depth** — tool-gating + statement classification + DB-level guarantee. |
 | 9 | Transactions | **Stateless atomic batch in v1** (`sql.execute_batch` — `BEGIN`/…/`COMMIT` in one call). Handle-based `begin`/`commit`/`rollback` deferred to v2. |
@@ -93,9 +93,15 @@ All credentials and config ride existing workspace mechanisms — no parallel sy
 
 ## 5. Connection model
 
-- **One connection per server instance**, pooled and health-checked on connect.
+- **One database (DSN) per server instance**, backed by a **small connection pool** (default a
+  handful of connections), health-checked on connect. "One database per instance" means tools take
+  **no** connection argument — not literally one socket; the pool lets independent tool calls run
+  without serializing behind each other.
+- **MCP delivers no ordering/serialization guarantee** across tool calls. Each call checks out its
+  own pooled connection for its duration, so concurrent calls are isolated; a single connection is
+  never shared by two in-flight calls.
 - To expose several databases, the operator declares several `mcp:sql` instances, each with its own
-  `id`, dialect, DSN, and access scope. Tools take **no** connection argument.
+  `id`, dialect, DSN, and access scope.
 
 ## 6. Tool surface
 
@@ -152,22 +158,36 @@ intent; the scope (§7.1) gates which tools are even registered.
 2. **Statement classification.** Every submitted SQL string is parsed/classified (SELECT vs DML vs
    DDL). A statement whose class doesn't match the calling tool, or is out of the instance's scope,
    is rejected with `ACCESS_DENIED`. Multi-statement stacking (`;`) and comment-smuggling are
-   blocked regardless of scope.
-3. **DB-level guarantee.** Reads run in a READ ONLY transaction. Docs strongly recommend binding a
-   **read-only DB role** for `readonly` instances — the database is the last line of defense, not
-   the classifier.
+   blocked regardless of scope. The classifier is a **single shared implementation** with per-dialect
+   hooks only for genuine syntax differences (e.g. `MERGE`, dialect-specific DDL keywords) — **not**
+   four independent per-dialect classifiers, whose evasion-resistance would inevitably drift apart.
+3. **DB-level guarantee (required, not advisory).** Reads run in a READ ONLY transaction. A
+   `readonly` instance **must** be bound to a read-only DB role; the server attempts to verify the
+   role at connect and **logs a startup warning** when it cannot confirm read-only. Without a
+   DB-level role the `readonly` guarantee is not absolute — a single classifier bug would otherwise
+   collapse the model to two in-process controls. The database is the last line of defense, not the
+   classifier.
 
 ## 8. Result & safety limits
 
 Defaults below; all env-overridable and surfaced in `sql.capabilities`.
 
-| Limit | Default | Error code |
+| Limit | Default | Signal |
 |---|---|---|
-| `max_rows` | 1000 (hard cap 10 000) → `truncated: true` when clipped | — |
-| `max_result_bytes` | 10 MiB | `RESULT_TOO_LARGE` |
-| `statement_timeout_ms` | 30 000 (set per statement/tx) | `STATEMENT_TIMEOUT` |
+| `max_rows` | 1000 (`SQL_MCP_MAX_ROWS`, **capped at 10 000**) | `truncated: true` + `warning: "ROWS_TRUNCATED"` |
+| `max_result_bytes` | 10 MiB | `RESULT_TOO_LARGE` (hard error) |
+| `statement_timeout_ms` | 30 000 (per statement) | `STATEMENT_TIMEOUT` |
 
+- **Truncation is never silent.** When a read hits `max_rows`, the result sets `truncated: true`
+  **and** carries a `ROWS_TRUNCATED` warning, so an agent that ignores the flag still sees the
+  signal — important for counts/aggregations/existence checks. To read past `max_rows`, page with
+  the `next_cursor` keyset (§6a); it is the deliberate "get the rest" path. (`max_result_bytes` is a
+  hard error rather than a truncation because a half-serialized row can't be returned safely.)
 - **Parameterization is mandatory** — bind params as an array; no string interpolation of values.
+  The server accepts a **canonical `$1`/`$2` placeholder style** and rewrites placeholders to the
+  dialect-native form (`?` for MySQL/SQLite, `@pN` for MSSQL) before execution, so the agent never
+  has to know the target dialect's placeholder syntax. The active `paramStyle` is still reported in
+  `sql.capabilities` for transparency.
 - **Type handling:** dates → ISO strings; `bigint`/wide numeric → string (JSON-safe); binary →
   base64; SQL `NULL` → `null`.
 
@@ -180,11 +200,19 @@ Uniform structured envelope (cf. ppt):
   "status": "success" | "error",
   "code": "VALIDATION_ERROR" | "ACCESS_DENIED" | "CONNECTION_FAILED" | "STATEMENT_TIMEOUT" | "RESULT_TOO_LARGE" | "DIALECT_UNSUPPORTED" | "TOOL_EXECUTION_ERROR",
   "error": "human-readable message (only when status=error)",
+  "warning": "ROWS_TRUNCATED",
   "retriable": false,
   "tool_name": "sql.query",
   "data": { }
 }
 ```
+
+- **Credential scrubbing is mandatory.** Driver errors routinely embed the full DSN, including the
+  password (e.g. `connect ECONNREFUSED postgresql://admin:s3cret@host/db`). Every driver error
+  **must** be passed through a sanitizer that strips connection-string / credential patterns (DSNs,
+  passwords, bearer tokens) before its message reaches the `error` field or any log line. Credentials
+  must never appear in tool output or logs.
+- `warning` is optional and non-fatal (`status` stays `success`); `ROWS_TRUNCATED` is the first user.
 
 ## 10. Internal dialect abstraction
 
@@ -260,3 +288,7 @@ Out of scope entirely (v1):
 - Whether to accept discrete connection fields (host/port/db/user) in addition to a single DSN.
 - Asset publication shape (`upstream_pointer` release artifact layout: `server.js` + manifest with
   sha256).
+- **SQLite has no native statement timeout** — `node:sqlite` would need an application-level abort
+  via `sqlite3_interrupt()` driven by a timer to honour `statement_timeout_ms`.
+- **`tedious` is CommonJS** — confirm `bun build --target=node` bundles it cleanly (CJS/ESM
+  interop edge cases) as part of the build setup.
