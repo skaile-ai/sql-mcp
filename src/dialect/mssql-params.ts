@@ -1,5 +1,8 @@
 // src/dialect/mssql-params.ts
-import { TYPES, type TediousType } from "tedious";
+import { TYPES } from "tedious";
+// tedious does not re-export its `DataType` interface from the package root; this is a
+// type-only import (erased at build time, so it does not affect the bundle).
+import type { DataType as TediousType } from "tedious/lib/data-type.js";
 
 /** Rewrite canonical `$1,$2` placeholders to tedious named placeholders `@p1,@p2`. */
 export function rewriteToNamed(canonicalSql: string): string {
