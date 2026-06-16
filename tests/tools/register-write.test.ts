@@ -5,7 +5,8 @@ import type { Dialect } from "../../src/dialect/types.js";
 import type { Config, AccessScope } from "../../src/config.js";
 
 const dialect: Dialect = {
-  name: "sqlite", paramStyle: "?", connect: async () => {}, close: async () => {},
+  name: "sqlite", paramStyle: "?", classifyHooks: {}, supportsStatementTimeout: false,
+  connect: async () => {}, close: async () => {},
   rewriteParams: (s) => s, quoteIdent: (n) => `"${n}"`,
   query: async () => ({ columns: [], rows: [] }),
   execute: async () => ({ rowCount: 1 }), executeBatch: async () => [{ rowCount: 1 }],

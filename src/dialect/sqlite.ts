@@ -26,6 +26,8 @@ const defaultFactory: SqliteDbFactory = (path, readOnly) => {
 export class SqliteDialect implements Dialect {
   readonly name = "sqlite" as const;
   readonly paramStyle = "?" as const;
+  readonly classifyHooks = {} as const;
+  readonly supportsStatementTimeout = false;
   private db: SqliteDb | null = null;
 
   constructor(

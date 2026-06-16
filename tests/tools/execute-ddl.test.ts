@@ -10,7 +10,8 @@ const config: Config = {
 };
 function fakeDialect(over: Partial<Dialect> = {}): Dialect {
   return {
-    name: "sqlite", paramStyle: "?", connect: async () => {}, close: async () => {},
+    name: "sqlite", paramStyle: "?", classifyHooks: {}, supportsStatementTimeout: false,
+    connect: async () => {}, close: async () => {},
     rewriteParams: (s) => s, quoteIdent: (n) => `"${n}"`,
     query: async () => ({ columns: [], rows: [] }),
     execute: async () => ({ rowCount: 0 }), executeBatch: async () => [],

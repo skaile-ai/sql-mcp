@@ -13,6 +13,8 @@ const config: Config = {
 function dialectReturning(rows: Record<string, unknown>[]): Dialect {
   return {
     name: "sqlite", paramStyle: "?",
+    classifyHooks: {},
+    supportsStatementTimeout: false,
     connect: async () => {}, close: async () => {},
     rewriteParams: (s) => s.replace(/\$\d+/g, "?"),
     quoteIdent: (n) => `"${n}"`,

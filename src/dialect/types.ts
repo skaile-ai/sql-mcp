@@ -30,6 +30,10 @@ export interface BatchStatement {
 export interface Dialect {
   readonly name: DialectName;
   readonly paramStyle: "$n" | "?" | "@p";
+  /** Per-dialect keyword hooks for the shared classifier (e.g. MERGE as DML). */
+  readonly classifyHooks: import("../classifier.js").ClassifyHooks;
+  /** Whether this dialect enforces `statement_timeout_ms` at the driver/DB level. */
+  readonly supportsStatementTimeout: boolean;
   connect(dsn: string): Promise<void>;
   close(): Promise<void>;
   /** Rewrite canonical `$1/$2` placeholders into the dialect-native form. */

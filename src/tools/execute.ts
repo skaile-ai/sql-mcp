@@ -17,7 +17,7 @@ export async function handleExecute(
   _config: Config,
   input: ExecuteInput,
 ): Promise<Envelope<{ rowCount: number }>> {
-  const cls = classify(input.sql);
+  const cls = classify(input.sql, dialect.classifyHooks);
   if (cls.class !== "dml") {
     return err(TOOL, "ACCESS_DENIED", `sql.execute accepts a single DML statement only (got ${cls.class})`);
   }

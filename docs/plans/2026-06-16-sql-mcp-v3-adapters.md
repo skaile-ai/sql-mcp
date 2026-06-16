@@ -22,6 +22,20 @@
 | Keyset vs offset cursor | Unchanged from Phase 1: **offset pagination** via the existing `paginate()` sub-select wrapper in `handleQuery`. Adapters only execute the wrapped SQL; no per-dialect cursor logic. |
 | Identifier allowlist | Introspection binds the table/schema name as a **value parameter** into `information_schema` queries (no identifier interpolation needed), and additionally `assertValidIdent`-validates before binding (defense in depth). `quoteIdent` is still implemented per-dialect for interface completeness. |
 
+## Correction (post-3a review) — pin a single connection for transactions
+
+A pooled `query()`/`pool.query()` checks out a **different connection per call**. Running
+`BEGIN` / `<stmt>` / `COMMIT` as separate pooled-`query` calls therefore (a) scatters the
+statements across connections so the transaction never brackets them, (b) **breaks
+`executeBatch` atomicity** (the v1 transaction primitive — spec §6), and (c) leaks a connection
+back to the pool with an open transaction. Any multi-statement transaction MUST pin one
+connection: Postgres `pool.connect()` → client → `release()`; MySQL `pool.getConnection()` →
+conn → `release()`. Single auto-commit statements (`execute`, the readonly verification query)
+may still use `pool.query()`. The Postgres code below has been fixed (commit on the 3a branch);
+the MySQL code in Part 3b already reflects this. MSSQL uses one long-lived connection (no pool),
+so it is unaffected. Each transaction adapter carries a live atomicity test (mid-batch failure ⇒
+earlier statements rolled back).
+
 ---
 
 ## Part 3a — Shared scaffolding + PostgreSQL adapter (PR A)
@@ -712,12 +726,18 @@ import { MysqlDialect, type MysqlPool, type MysqlPoolFactory } from "../../src/d
 interface Call { sql: string; params: unknown[]; }
 function fakePool(rowsFor: (sql: string) => any[]): { pool: MysqlPool; calls: Call[] } {
   const calls: Call[] = [];
+  const run = (sql: string, params: unknown[] = []) => {
+    calls.push({ sql, params });
+    // mysql2 returns [rows, fields]; for non-SELECT it returns a ResultSetHeader.
+    return [rowsFor(sql) as any, []] as [any, any];
+  };
   const pool: MysqlPool = {
+    // Transactions run on a pinned connection; the fake records its query()s into the same array.
+    async getConnection() {
+      return { query: async (s: string, p: unknown[] = []) => run(s, p), release() {} };
+    },
     async query(sql: string, params: unknown[] = []) {
-      calls.push({ sql, params });
-      const rows = rowsFor(sql);
-      // mysql2 returns [rows, fields]; for non-SELECT it returns a ResultSetHeader.
-      return [rows as any, []];
+      return run(sql, params);
     },
     async end() {},
   };
@@ -774,8 +794,16 @@ import type { BatchStatement, ColumnInfo, Dialect, QueryResult, TableInfo } from
 
 // Minimal slice of mysql2/promise Pool. query() returns [rows, fields] like mysql2.
 export type MysqlQueryReturn = [unknown, unknown];
-export interface MysqlPool {
+// A pooled connection — transactions MUST run on a single pinned connection, never via pool.query()
+// (the pool hands out a different connection per call, which would scatter BEGIN/…/COMMIT and
+// silently break atomicity). Mirrors the pg PgClient fix.
+export interface MysqlConnection {
   query(sql: string, params?: unknown[]): Promise<MysqlQueryReturn>;
+  release(): void;
+}
+export interface MysqlPool {
+  getConnection(): Promise<MysqlConnection>;
+  query(sql: string, params?: unknown[]): Promise<MysqlQueryReturn>; // single auto-commit statements only
   end(): Promise<void>;
 }
 export type MysqlPoolFactory = (dsn: string, opts: { readOnly: boolean; statementTimeoutMs: number }) => MysqlPool;
@@ -842,40 +870,45 @@ export class MysqlDialect implements Dialect {
   }
 
   async query(sql: string, params: unknown[]): Promise<QueryResult> {
-    const pool = this.require();
-    await pool.query("START TRANSACTION READ ONLY");
+    const conn = await this.require().getConnection();
     try {
-      const [rows] = await pool.query(sql, params);
-      await pool.query("COMMIT");
+      await conn.query("START TRANSACTION READ ONLY");
+      const [rows] = await conn.query(sql, params);
+      await conn.query("COMMIT");
       const arr = (rows as Record<string, unknown>[]) ?? [];
       const columns = arr.length > 0 ? Object.keys(arr[0]!) : [];
       return { columns, rows: arr };
     } catch (e) {
-      try { await pool.query("ROLLBACK"); } catch { /* original error wins */ }
+      try { await conn.query("ROLLBACK"); } catch { /* original error wins */ }
       throw e;
+    } finally {
+      conn.release();
     }
   }
 
   async execute(sql: string, params: unknown[]): Promise<{ rowCount: number }> {
+    // Single auto-commit statement: pool.query() is correct (no transaction to pin).
     const [res] = await this.require().query(sql, params);
     const affected = (res as { affectedRows?: number } | undefined)?.affectedRows ?? 0;
     return { rowCount: affected };
   }
 
   async executeBatch(statements: BatchStatement[]): Promise<Array<{ rowCount: number }>> {
-    const pool = this.require();
-    await pool.query("START TRANSACTION");
+    const conn = await this.require().getConnection();
     try {
+      await conn.query("START TRANSACTION");
       const results: Array<{ rowCount: number }> = [];
       for (const s of statements) {
-        const [res] = await pool.query(s.sql, s.params ?? []);
+        const [res] = await conn.query(s.sql, s.params ?? []);
         results.push({ rowCount: (res as { affectedRows?: number } | undefined)?.affectedRows ?? 0 });
       }
-      await pool.query("COMMIT");
+      await conn.query("COMMIT");
       return results;
     } catch (e) {
-      try { await pool.query("ROLLBACK"); } catch { /* original error wins */ }
+      try { await conn.query("ROLLBACK"); } catch { /* original error wins */ }
       throw e;
+    } finally {
+      conn.release();
     }
   }
 
@@ -1034,6 +1067,23 @@ describe.skipIf(!LIVE)("MySQL live integration", () => {
     const env = await handleExecute(d, cfg(dsn, "dml"), { sql: "INSERT INTO users (name) VALUES ($1)", params: ["x"] });
     if (env.status !== "success") throw new Error(env.error);
     expect(env.data.rowCount).toBe(1);
+    await d.close();
+  });
+
+  it("execute_batch is atomic: a mid-batch failure rolls back earlier statements", async () => {
+    const d = new MysqlDialect("dml", undefined, 30_000);
+    await d.connect(dsn);
+    const before = await d.query("SELECT COUNT(*) AS n FROM users", []);
+    const beforeN = Number(before.rows[0]!.n);
+    // Second statement violates the PK (id=1 already exists) → whole batch must roll back.
+    await expect(
+      d.executeBatch([
+        { sql: "INSERT INTO users (name) VALUES (?)", params: ["batch-a"] },
+        { sql: "INSERT INTO users (id, name) VALUES (?, ?)", params: [1, "dup"] },
+      ]),
+    ).rejects.toThrow();
+    const after = await d.query("SELECT COUNT(*) AS n FROM users", []);
+    expect(Number(after.rows[0]!.n)).toBe(beforeN); // first INSERT was rolled back
     await d.close();
   });
 });
@@ -1692,4 +1742,7 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 - **v2 roadmap:** handle-based transactions (`begin`/`commit`/`rollback`) + server-side cursors (the shared pinned-connection engine).
 - **Configurable `execute_batch` cap** (`SQL_MCP_MAX_BATCH_STATEMENTS`) if a real need appears.
 - **Discrete connection fields** (host/port/user) as an alternative to a single DSN.
+- **Configurable pool size** (`SQL_MCP_PG_POOL_MAX` and per-dialect equivalents) — pg/mysql currently hardcode a small pool (spec §5). Add when concurrency tuning is actually needed.
+
+> **3a review carryover for 3b/3c:** route introspection reads through the same READ-ONLY-transaction helper as `query()` (pg added a private `withReadTx`). For MySQL, wrap `listSchemas`/`listTables`/`describeTable` in a `getConnection()` + `START TRANSACTION READ ONLY` helper too. Verify the readonly guarantee against the *session-default* flag, not the current-transaction flag (pg uses `SHOW default_transaction_read_only`).
 - **Keyset pagination** (ordering-key cursor) as an upgrade over offset, per spec §6a — offset is the v1 baseline.

@@ -5,6 +5,8 @@ const PATTERNS: Array<[RegExp, string]> = [
   [/(\b[a-z][a-z0-9+.-]*:\/\/[^\s:/@]+:)[^\s@]+(@)/gi, "$1***$2"],
   // key=value secrets: password=..., passwd=..., pwd=..., pass=..., Password=...;
   [/(\b(?:password|passwd|pwd|pass)\s*=\s*)[^;\s]+/gi, "$1***"],
+  // Additional key=value secrets surfaced by networked drivers (token, api keys, generic secret, ssl key material)
+  [/(\b(?:token|api[_-]?key|secret|ssl_key|sslpassword)\s*=\s*)[^;\s]+/gi, "$1***"],
   // Bearer tokens
   [/(\bBearer\s+)[A-Za-z0-9._\-]+/gi, "$1***"],
 ];
