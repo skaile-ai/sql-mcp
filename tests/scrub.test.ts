@@ -27,6 +27,19 @@ describe("scrubCredentials", () => {
     expect(scrubCredentials("bypass=ok")).toBe("bypass=ok");
   });
 
+  it("scrubs token / api_key / secret / ssl_key style secrets", () => {
+    expect(scrubCredentials("token=abc123 failed")).toBe("token=*** failed");
+    expect(scrubCredentials("api_key=zzz; host=x")).toBe("api_key=***; host=x");
+    expect(scrubCredentials("apikey=zzz")).toBe("apikey=***");
+    expect(scrubCredentials("secret=hunter2")).toBe("secret=***");
+    expect(scrubCredentials("ssl_key=/etc/k.pem")).toBe("ssl_key=***");
+    expect(scrubCredentials("sslpassword=zzz")).toBe("sslpassword=***");
+  });
+
+  it("scrubs MSSQL connection-string style 'Password=...;'", () => {
+    expect(scrubCredentials("Server=h;Database=d;User Id=sa;Password=P@ss1;")).toContain("Password=***;");
+  });
+
   it("leaves clean text untouched", () => {
     expect(scrubCredentials("table users not found")).toBe("table users not found");
   });
