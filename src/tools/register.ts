@@ -5,6 +5,9 @@ import type { Dialect } from "../dialect/types.js";
 import { handleCapabilities } from "./capabilities.js";
 import { handleListSchemas, handleListTables, handleDescribeTable } from "./introspection.js";
 import { handleQuery } from "./query.js";
+import { handleExecute } from "./execute.js";
+import { handleExecuteDdl } from "./execute_ddl.js";
+import { handleExecuteBatch } from "./execute_batch.js";
 import { err } from "../envelope.js";
 import { safeErrorMessage } from "../scrub.js";
 
@@ -84,4 +87,40 @@ export function registerReadTools(server: ToolRegistrar, dialect: Dialect, confi
     },
     wrap("sql.query", (a) => handleQuery(dialect, config, a)),
   );
+}
+
+export function registerWriteTools(server: ToolRegistrar, dialect: Dialect, config: Config): void {
+  if (config.access === "readonly") return; // no write tools for read-only instances
+
+  server.registerTool(
+    "sql.execute",
+    {
+      description: "Run a single DML statement (INSERT/UPDATE/DELETE). Parameterized ($1,$2). Auto-commits.",
+      inputSchema: { sql: z.string(), params: z.array(z.unknown()).optional() },
+    },
+    wrap("sql.execute", (a) => handleExecute(dialect, config, a)),
+  );
+
+  server.registerTool(
+    "sql.execute_batch",
+    {
+      description:
+        "Run an ordered array of DML statements atomically (one BEGIN/COMMIT). All statements are classified before any executes; any non-DML rejects the whole batch.",
+      inputSchema: {
+        statements: z.array(z.object({ sql: z.string(), params: z.array(z.unknown()).optional() })),
+      },
+    },
+    wrap("sql.execute_batch", (a) => handleExecuteBatch(dialect, config, a)),
+  );
+
+  if (config.access === "full") {
+    server.registerTool(
+      "sql.execute_ddl",
+      {
+        description: "Run a single DDL statement (CREATE/ALTER/DROP/TRUNCATE). Only available at `full` scope.",
+        inputSchema: { sql: z.string(), params: z.array(z.unknown()).optional() },
+      },
+      wrap("sql.execute_ddl", (a) => handleExecuteDdl(dialect, config, a)),
+    );
+  }
 }
