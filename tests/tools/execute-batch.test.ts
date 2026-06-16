@@ -43,6 +43,15 @@ describe("handleExecuteBatch", () => {
     expect(env).toMatchObject({ status: "error", code: "VALIDATION_ERROR" });
   });
 
+  it("rejects an oversized batch with VALIDATION_ERROR (nothing executes)", async () => {
+    const executeBatch = vi.fn(async () => [] as Array<{ rowCount: number }>);
+    const env = await handleExecuteBatch(fakeDialect({ executeBatch }), config, {
+      statements: Array.from({ length: 101 }, () => ({ sql: "INSERT INTO t VALUES (1)" })),
+    });
+    expect(env).toMatchObject({ status: "error", code: "VALIDATION_ERROR" });
+    expect(executeBatch).not.toHaveBeenCalled();
+  });
+
   it("returns an error envelope (rolled back) when the dialect throws", async () => {
     const env = await handleExecuteBatch(
       fakeDialect({ executeBatch: async () => { throw new Error("constraint at host postgres://u:p@h/db"); } }),

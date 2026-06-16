@@ -56,4 +56,25 @@ describe("SqliteDialect (write)", () => {
     expect(calls).toContain("exec:ROLLBACK");
     expect(calls).not.toContain("exec:COMMIT");
   });
+
+  it("executeBatch() surfaces the original error even when ROLLBACK itself throws", async () => {
+    // run() throws "ORIGINAL"; exec("ROLLBACK") also throws — the original must win.
+    const db: SqliteDb = {
+      prepare(_sql: string) {
+        return {
+          all: () => [],
+          run: (..._params: unknown[]) => { throw new Error("ORIGINAL"); },
+        };
+      },
+      exec: (sql: string) => {
+        if (sql === "ROLLBACK") throw new Error("rollback boom");
+      },
+      close() {},
+    };
+    const d = new SqliteDialect("dml", () => db);
+    await d.connect(":memory:");
+    await expect(
+      d.executeBatch([{ sql: "INSERT INTO t VALUES (1)" }]),
+    ).rejects.toThrow(/ORIGINAL/);
+  });
 });

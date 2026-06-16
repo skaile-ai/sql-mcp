@@ -7,6 +7,9 @@ import { safeErrorMessage } from "../scrub.js";
 
 const TOOL = "sql.execute_batch";
 
+// Bounds the work a single batch can pin to the connection. Could become configurable later.
+const MAX_BATCH_STATEMENTS = 100;
+
 export interface ExecuteBatchInput {
   statements: BatchStatement[];
 }
@@ -18,6 +21,10 @@ export async function handleExecuteBatch(
 ): Promise<Envelope<{ results: Array<{ rowCount: number }> }>> {
   if (!input.statements || input.statements.length === 0) {
     return err(TOOL, "VALIDATION_ERROR", "execute_batch requires at least one statement");
+  }
+
+  if (input.statements.length > MAX_BATCH_STATEMENTS) {
+    return err(TOOL, "VALIDATION_ERROR", `execute_batch accepts at most ${MAX_BATCH_STATEMENTS} statements per call`);
   }
 
   // Classify EVERY statement before anything executes; any non-DML rejects the whole batch.

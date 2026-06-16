@@ -79,7 +79,7 @@ export class SqliteDialect implements Dialect {
       db.exec("COMMIT");
       return results;
     } catch (e) {
-      db.exec("ROLLBACK");
+      try { db.exec("ROLLBACK"); } catch { /* best-effort; original error takes priority */ }
       throw e;
     }
   }

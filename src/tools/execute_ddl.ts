@@ -9,7 +9,6 @@ const TOOL = "sql.execute_ddl";
 
 export interface ExecuteDdlInput {
   sql: string;
-  params?: unknown[];
 }
 
 export async function handleExecuteDdl(
@@ -23,7 +22,7 @@ export async function handleExecuteDdl(
   }
   try {
     const native = dialect.rewriteParams(input.sql);
-    return ok(TOOL, await dialect.execute(native, input.params ?? []));
+    return ok(TOOL, await dialect.execute(native, []));
   } catch (e) {
     return err(TOOL, "TOOL_EXECUTION_ERROR", safeErrorMessage(e));
   }

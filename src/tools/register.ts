@@ -118,7 +118,7 @@ export function registerWriteTools(server: ToolRegistrar, dialect: Dialect, conf
       "sql.execute_ddl",
       {
         description: "Run a single DDL statement (CREATE/ALTER/DROP/TRUNCATE). Only available at `full` scope.",
-        inputSchema: { sql: z.string(), params: z.array(z.unknown()).optional() },
+        inputSchema: { sql: z.string() },
       },
       wrap("sql.execute_ddl", (a) => handleExecuteDdl(dialect, config, a)),
     );

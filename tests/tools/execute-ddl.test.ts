@@ -34,4 +34,11 @@ describe("handleExecuteDdl", () => {
     const env = await handleExecuteDdl(fakeDialect(), config, { sql: "SELECT 1" });
     expect(env).toMatchObject({ status: "error", code: "ACCESS_DENIED" });
   });
+
+  it("rejects multi-statement DDL with ACCESS_DENIED", async () => {
+    const env = await handleExecuteDdl(fakeDialect(), config, {
+      sql: "CREATE TABLE t (id INTEGER); DROP TABLE t",
+    });
+    expect(env).toMatchObject({ status: "error", code: "ACCESS_DENIED" });
+  });
 });
