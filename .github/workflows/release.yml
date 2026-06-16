@@ -1,0 +1,56 @@
+name: Release
+
+# Tag-driven release. Push a `v*` tag (e.g. v0.1.0) to build the single-file
+# bundle and publish it as a GitHub Release. The release assets are what the
+# Skaile `ai-assets/mcp/sql` catalog entry consumes as an `upstream_pointer`:
+#   - server.js     — the bundled MCP server (run by the baseline `node`)
+#   - manifest.json  — { file, sha256, version } for integrity-pinned install
+#
+# Adapted from the platform's changesets+Jenkins release: this repo ships a
+# standalone artifact rather than deploying a service, so the release model is
+# build-bundle → attach-to-GitHub-Release rather than a Version PR + deploy branch.
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write # create the release + upload assets
+
+jobs:
+  release:
+    name: Build & publish release artifact
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: "1.3.11"
+
+      - run: bun install --frozen-lockfile
+
+      - name: Build single-file bundle
+        run: bun run build # produces dist/server.js
+
+      - name: Generate integrity manifest
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          SHA256=$(sha256sum dist/server.js | awk '{print $1}')
+          cat > dist/manifest.json <<EOF
+          {
+            "file": "server.js",
+            "sha256": "${SHA256}",
+            "version": "${VERSION}"
+          }
+          EOF
+          cat dist/manifest.json
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            dist/server.js dist/manifest.json \
+            --title "${GITHUB_REF_NAME}" \
+            --generate-notes

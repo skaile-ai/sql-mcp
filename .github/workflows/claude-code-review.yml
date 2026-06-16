@@ -1,0 +1,85 @@
+name: Claude Code Review
+
+on:
+  pull_request:
+    types: [opened, synchronize, ready_for_review, reopened]
+
+jobs:
+  claude-review:
+    # Self-hosted runner (label `claude`) to match the platform repo and consume
+    # zero GitHub-hosted Actions minutes. Requires this repo to be in the org
+    # runner group's access list; if the review never picks up a runner, either
+    # add the repo to the runner group or switch this to `ubuntu-latest`.
+    runs-on: [self-hosted, claude]
+    permissions:
+      contents: read
+      pull-requests: write
+      id-token: write
+      # Lets the action's github_ci MCP server read CI check results during review.
+      actions: read
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+
+      - name: Run Claude Code Review
+        id: claude-review
+        uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          track_progress: true
+          # Opt into the github_ci MCP server (reads CI status); pairs with the
+          # actions: read job permission above.
+          additional_permissions: |
+            actions: read
+          prompt: |
+            REPO: ${{ github.repository }}
+            PR NUMBER: ${{ github.event.pull_request.number }}
+
+            This repository is `sql-mcp`: a portable Node/TypeScript **MCP server**
+            giving Skaile agents permission-scoped access to PostgreSQL, MySQL,
+            SQLite, and MSSQL through one unified, dialect-agnostic toolset.
+
+            Note: a PR here may contain **design/spec documents** (under `docs/specs/`)
+            rather than code. If so, review the design for clarity, internal
+            consistency, feasibility, security gaps, and alignment with the decisions
+            recorded in the spec — not for code style.
+
+            For code changes, perform a comprehensive review focused on:
+
+            1. **SQL safety (highest priority)**
+               - Parameterization is mandatory — flag any value interpolated into SQL strings.
+               - Statement classification must be robust against comment-smuggling and
+                 stacked-statement (`;`) evasion.
+               - Verify the defense-in-depth access model holds: tool-gating + statement
+                 classification + DB-level read-only transactions. A read-only instance
+                 must not be able to mutate data through any path.
+
+            2. **Secret handling**
+               - DSNs / credentials must never be logged or echoed in errors.
+               - Credentials must resolve via the workspace secret-injection mechanism
+                 (`env:` refs / backend token mediator), never hard-coded.
+
+            3. **MCP protocol correctness**
+               - Tool input schemas, the uniform structured response envelope, and error
+                 codes are well-formed and consistent.
+
+            4. **Dialect abstraction**
+               - Dialect-specific logic stays behind the `Dialect` interface; the tool
+                 layer stays dialect-agnostic.
+
+            5. **Result handling & limits**
+               - Row/byte/timeout limits enforced; type coercion (bigint→string,
+                 dates→ISO, binary→base64, NULL→null) is correct and JSON-safe.
+
+            6. **Code quality & testing**
+               - Error handling, edge cases, readability; adequate test coverage,
+                 especially around the access-enforcement and classification logic.
+
+            Use the repository's CLAUDE.md and REVIEW.md (when present) and the design
+            spec under docs/specs/ for guidance on conventions and intended behaviour.
+            Be constructive but concise. Use inline comments for specific issues.
+            Use a top-level comment only for a brief summary.
+
+          claude_args: '--allowed-tools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr comment:*),Bash(gh pr diff:*),Bash(gh pr view:*),Bash(gh api:*)"'
