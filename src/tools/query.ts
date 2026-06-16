@@ -35,7 +35,7 @@ export async function handleQuery(
   config: Config,
   input: QueryInput,
 ): Promise<Envelope<QueryData>> {
-  const cls = classify(input.sql);
+  const cls = classify(input.sql, dialect.classifyHooks);
   if (cls.class !== "select") {
     return err(TOOL, "ACCESS_DENIED", `sql.query accepts read-only SELECT only (got ${cls.class})`);
   }

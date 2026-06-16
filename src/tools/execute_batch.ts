@@ -29,7 +29,7 @@ export async function handleExecuteBatch(
 
   // Classify EVERY statement before anything executes; any non-DML rejects the whole batch.
   for (let i = 0; i < input.statements.length; i++) {
-    const cls = classify(input.statements[i]!.sql);
+    const cls = classify(input.statements[i]!.sql, dialect.classifyHooks);
     if (cls.class !== "dml") {
       return err(TOOL, "ACCESS_DENIED", `statement ${i} is not DML (got ${cls.class}); batch rejected`);
     }

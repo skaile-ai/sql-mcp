@@ -9,7 +9,8 @@ const config: Config = {
   maxRows: 1000, maxResultBytes: 10_485_760, statementTimeoutMs: 30_000, cursorSecret: "s",
 };
 const dialect: Dialect = {
-  name: "sqlite", paramStyle: "?", connect: async () => {}, close: async () => {},
+  name: "sqlite", paramStyle: "?", classifyHooks: {}, supportsStatementTimeout: false,
+  connect: async () => {}, close: async () => {},
   rewriteParams: (s) => s, quoteIdent: (n) => `"${n}"`,
   query: async () => ({ columns: ["n"], rows: [{ n: 1 }] }),
   execute: async () => ({ rowCount: 0 }), executeBatch: async () => [],

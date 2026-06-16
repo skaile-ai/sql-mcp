@@ -16,7 +16,7 @@ export async function handleExecuteDdl(
   _config: Config,
   input: ExecuteDdlInput,
 ): Promise<Envelope<{ rowCount: number }>> {
-  const cls = classify(input.sql);
+  const cls = classify(input.sql, dialect.classifyHooks);
   if (cls.class !== "ddl") {
     return err(TOOL, "ACCESS_DENIED", `sql.execute_ddl accepts a single DDL statement only (got ${cls.class})`);
   }

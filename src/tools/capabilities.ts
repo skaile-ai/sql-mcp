@@ -27,7 +27,7 @@ export async function handleCapabilities(
       ddl: config.access === "full",
       transactions_handle: false, // v2
       server_side_cursors: false, // v2
-      statement_timeout: false, // SQLite has no native statement-timeout cancellation in Node 24 (spec §13).
+      statement_timeout: dialect.supportsStatementTimeout,
     },
     limits: {
       max_rows: config.maxRows,

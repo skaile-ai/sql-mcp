@@ -12,6 +12,8 @@ const config: Config = {
 
 const dialect: Dialect = {
   name: "sqlite", paramStyle: "?",
+  classifyHooks: {},
+  supportsStatementTimeout: false,
   connect: async () => {}, close: async () => {},
   rewriteParams: (s) => s, quoteIdent: (n) => `"${n}"`,
   query: async () => ({ columns: [], rows: [] }),
