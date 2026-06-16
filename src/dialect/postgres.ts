@@ -72,6 +72,11 @@ export class PostgresDialect implements Dialect {
     return canonicalSql; // Postgres is natively $1,$2,...
   }
 
+  paginate(sql: string, limit: number, offset: number): string {
+    const trimmed = sql.replace(/;\s*$/, "");
+    return `SELECT * FROM (${trimmed}) AS _page LIMIT ${limit} OFFSET ${offset}`;
+  }
+
   quoteIdent(name: string): string {
     assertValidIdent(name);
     return quoteIdentAnsi(name);
