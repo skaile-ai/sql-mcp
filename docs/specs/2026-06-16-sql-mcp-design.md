@@ -130,9 +130,12 @@ intent; the scope (§7.1) gates which tools are even registered.
   and SELECT here. Each call auto-commits (no open transaction is held across calls).
 - `sql.execute_batch` — an **ordered array** of parameterized DML statements run atomically as a
   single `BEGIN`/…/`COMMIT` **within one tool call** (rolled back as a whole on any failure).
-  Returns per-statement `{rowCount}`. This is v1's transaction primitive — it gives multi-statement
-  atomicity with **zero cross-call state**. (It cannot branch on intermediate results mid-transaction;
-  that needs handle-based transactions — deferred to v2, see §12.)
+  **Every statement is classified _before_ the `BEGIN` opens** — a DDL or SELECT in *any* position
+  rejects the entire batch with `ACCESS_DENIED` and nothing executes. Returns a **positional array**
+  `[{rowCount}, …]` aligned to the input order on success; a failed (and therefore fully
+  rolled-back) batch returns an `error` envelope, never a partial array. This is v1's transaction
+  primitive — multi-statement atomicity with **zero cross-call state**. (It cannot branch on
+  intermediate results mid-transaction; that needs handle-based transactions — deferred to v2, see §12.)
 
 **Schema — `full` scope only:**
 
@@ -145,7 +148,16 @@ intent; the scope (§7.1) gates which tools are even registered.
   ordering key + last-seen value (preferred) or an offset (fallback when no orderable key exists).
   The agent passes it back to `sql.query` to get the next page. Nothing is pinned server-side, so
   pages survive process restarts and never leak connections. Trade-offs: keyset needs an orderable
-  key; deep `OFFSET` is inefficient; pages are not snapshot-consistent (data may shift between pages).
+  key; pages are not snapshot-consistent (data may shift between pages).
+- **Cursor tokens MUST be integrity-protected** (HMAC or authenticated encryption with a
+  server-held key). The token feeds the `keysetPredicate` WHERE clause, so an unsigned token is a
+  blind-injection oracle — a caller could craft a cursor to inject arbitrary values into the query.
+  The server rejects any token that fails verification. (This is a security requirement, not just a
+  format choice.)
+- **Offset fallback is O(n) and must be flagged.** When no orderable key exists and the cursor falls
+  back to `OFFSET`, the database scans and discards the first N rows on every page. The result
+  carries a warning when the offset fallback is active; it should only be used when the total page
+  count is expected to be small. Prefer keyset whenever the query has a unique orderable key.
 - **No cross-call logical state in v1.** The server holds only the connection pool. There are no
   pinned-connection handles, so there is no idle-transaction timeout, single-flight gate, or handle
   registry to manage. Handle-based transactions and server-side DB cursors (which both require that
@@ -157,10 +169,16 @@ intent; the scope (§7.1) gates which tools are even registered.
    `execute` / `execute_ddl` / transaction-write tools.
 2. **Statement classification.** Every submitted SQL string is parsed/classified (SELECT vs DML vs
    DDL). A statement whose class doesn't match the calling tool, or is out of the instance's scope,
-   is rejected with `ACCESS_DENIED`. Multi-statement stacking (`;`) and comment-smuggling are
-   blocked regardless of scope. The classifier is a **single shared implementation** with per-dialect
-   hooks only for genuine syntax differences (e.g. `MERGE`, dialect-specific DDL keywords) — **not**
-   four independent per-dialect classifiers, whose evasion-resistance would inevitably drift apart.
+   is rejected with `ACCESS_DENIED`. The classifier is a **single shared implementation** with
+   per-dialect hooks only for genuine syntax differences (e.g. `MERGE`, dialect-specific DDL
+   keywords) — **not** four independent per-dialect classifiers, whose evasion-resistance would
+   inevitably drift apart. It must be robust against the known evasion vectors:
+   - **Multi-statement stacking** (`;`) and **comment-smuggling** — blocked regardless of scope.
+   - **Data-modifying CTEs** — a `SELECT` whose `WITH` clause contains `INSERT`/`UPDATE`/`DELETE`
+     (e.g. `WITH d AS (DELETE FROM users RETURNING id) SELECT * FROM d`, valid in PostgreSQL/MSSQL)
+     is a **write**, not a read. The classifier must recurse into `WITH` clauses and reject such a
+     statement on `sql.query` / a `readonly` instance — a top-level `SELECT` verb is not sufficient
+     to deem it read-only.
 3. **DB-level guarantee (required, not advisory).** Reads run in a READ ONLY transaction. A
    `readonly` instance **must** be bound to a read-only DB role; the server attempts to verify the
    role at connect and **logs a startup warning** when it cannot confirm read-only. Without a
@@ -188,6 +206,13 @@ Defaults below; all env-overridable and surfaced in `sql.capabilities`.
   dialect-native form (`?` for MySQL/SQLite, `@pN` for MSSQL) before execution, so the agent never
   has to know the target dialect's placeholder syntax. The active `paramStyle` is still reported in
   `sql.capabilities` for transparency.
+- **Identifier safety for introspection tools.** `sql.list_tables(schema?)` and
+  `sql.describe_table(table)` take schema/table *identifiers*, which **cannot** be value-bound — they
+  must be interpolated into SQL. So they MUST (a) **allowlist-validate** the name before use (reject
+  anything not matching a strict pattern, e.g. `/^[\w$]{1,128}$/`, and/or confirm it exists in the
+  schema catalog) and (b) apply **dialect-specific identifier quoting** (`"name"` Postgres/SQLite,
+  `` `name` `` MySQL, `[name]` MSSQL). Without both, `describe_table("users\"; DROP TABLE users; --")`
+  is a textbook injection.
 - **Type handling:** dates → ISO strings; `bigint`/wide numeric → string (JSON-safe); binary →
   base64; SQL `NULL` → `null`.
 
@@ -226,7 +251,10 @@ interface Dialect {
   execute(sql, params)              // single auto-committed DML
   executeBatch(statements[])        // one BEGIN/…/COMMIT within the call (v1 atomicity primitive)
   // v2: beginTx()/commit()/rollback() handle + openCursor()/fetch()/close() — not in v1
-  classify(sql): 'select' | 'dml' | 'ddl' | 'other'   // or shared classifier + per-dialect quirks
+  // classify lives in ONE shared implementation (recurses into WITH/CTEs); Dialect
+  // provides only per-dialect keyword hooks (e.g. MERGE, dialect DDL verbs):
+  classifyHooks: { extraDmlVerbs, extraDdlVerbs }
+  quoteIdent(name)                                      // dialect identifier quoting + allowlist
   coerceRow(row)                                        // dates/bigint/binary normalization
   paramStyle: '$n' | '?' | '@p'
   keysetPredicate(orderKey, lastValue)                  // build the WHERE/ORDER for next_cursor
@@ -279,12 +307,15 @@ Out of scope entirely (v1):
 ## 13. Open items to pin during planning
 
 - Exact `${workspace}`-style absolute path token the materializer guarantees for the `args` path.
-- SQL parser/classifier choice per dialect (lightweight tokenizer vs. full parser) — must be robust
-  against comment/stacked-statement evasion.
+- SQL parser/classifier implementation (lightweight tokenizer vs. full parser) — must satisfy the
+  §7.2 evasion-resistance properties (stacking, comments, **data-modifying CTEs**). A parser that
+  understands `WITH` clauses is likely required, not a regex.
 - MSSQL read-only-transaction semantics via `tedious`.
 - Keyset pagination: how `next_cursor` picks the ordering key when the query has no obvious unique
-  key (fall back to `OFFSET`? require an `ORDER BY`? derive from PK?), and the token's encoding +
-  tamper-resistance.
+  key (fall back to `OFFSET`? require an `ORDER BY`? derive from PK?), and the token **format**
+  (the integrity-protection itself is required — see §6a — only the encoding format is open).
+- Identifier allowlist: exact validation pattern + whether to require catalog-existence confirmation
+  for `describe_table`/`list_tables` arguments (see §8).
 - Whether to accept discrete connection fields (host/port/db/user) in addition to a single DSN.
 - Asset publication shape (`upstream_pointer` release artifact layout: `server.js` + manifest with
   sha256).
