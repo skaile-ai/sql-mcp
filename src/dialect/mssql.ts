@@ -108,9 +108,14 @@ export class MssqlDialect implements Dialect {
 
   paginate(sql: string, limit: number, offset: number): string {
     const trimmed = sql.replace(/;\s*$/, "");
-    // MSSQL OFFSET/FETCH requires ORDER BY. The inner query's own ORDER BY governs row
-    // identity; the outer ORDER BY (SELECT 1) is the syntactic requirement for the window.
-    return `SELECT * FROM (${trimmed}) AS _page ORDER BY (SELECT 1) OFFSET ${offset} ROWS FETCH NEXT ${limit} ROWS ONLY`;
+    // MSSQL OFFSET/FETCH is part of the ORDER BY clause and cannot wrap a derived table
+    // that carries its own ORDER BY (T-SQL error 1033). Append the window to the caller's
+    // query instead. OFFSET/FETCH requires an ORDER BY, so inject a no-op one when absent.
+    // Heuristic limitation: a query whose ONLY ORDER BY sits inside a subquery should carry
+    // a top-level ORDER BY for stable pages (documented in the PR).
+    const hasOrderBy = /\border\s+by\b/i.test(trimmed);
+    const order = hasOrderBy ? "" : " ORDER BY (SELECT NULL)";
+    return `${trimmed}${order} OFFSET ${offset} ROWS FETCH NEXT ${limit} ROWS ONLY`;
   }
 
   quoteIdent(name: string): string {

@@ -21,4 +21,16 @@ describe("dialect.paginate", () => {
     expect(p).toMatch(/OFFSET 20 ROWS FETCH NEXT 10 ROWS ONLY/i);
     expect(p).toMatch(/ORDER BY/i);
   });
+
+  it("MSSQL injects ORDER BY (SELECT NULL) when caller has no ORDER BY, without a derived-table wrap", () => {
+    const p = new MssqlDialect("readonly", noop).paginate("SELECT * FROM users", 5, 0);
+    expect(p).toMatch(/ORDER BY \(SELECT NULL\) OFFSET 0 ROWS FETCH NEXT 5 ROWS ONLY/i);
+    expect(p).not.toMatch(/_page/i);
+  });
+
+  it("MSSQL preserves the caller's ORDER BY without double-ordering", () => {
+    const p = new MssqlDialect("readonly", noop).paginate("SELECT id FROM users ORDER BY id", 5, 0);
+    expect((p.match(/order by/gi) ?? []).length).toBe(1);
+    expect(p).not.toMatch(/\(SELECT NULL\)/i);
+  });
 });
