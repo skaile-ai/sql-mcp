@@ -1,0 +1,230 @@
+# SQL MCP Server — Design Spec
+
+**Status:** Draft (brainstormed 2026-06-16) · **Author:** Peter Albert · **Repo:** `skaile-ai/sql-mcp`
+
+A single, portable MCP server giving Skaile agents typed, permission-scoped access to the four
+common SQL engines — **PostgreSQL, MySQL, SQLite, MSSQL** — through one uniform toolset. The
+database engine is selected by configuration; dialect differences live entirely behind an internal
+adapter and never leak into the agent-facing tool surface.
+
+It is the third locally-run server in the `ai-assets/mcp/` catalog (after `xls`/excel and `ppt`),
+and the **first Node/TypeScript MCP server** in the catalog — establishing a lighter delivery
+pattern than the Java/POI servers.
+
+---
+
+## 1. Decisions locked during brainstorming
+
+| # | Decision | Choice |
+|---|----------|--------|
+| 1 | One server vs. one-per-engine | **One unified server**; dialect is config, not architecture. |
+| 2 | MCP server vs. extending the connector layer | **Standalone MCP server.** (The existing `postgres`/`sqlite` *connectors* are remnants slated to become MCP servers — this server is the target state, not a parallel subsystem. Their `adapter.ts` files are reference implementations.) |
+| 3 | Capability scope | **Configurable per instance** — `readonly` / `dml` / `full`. |
+| 4 | Credentials | **Existing workspace secret injection** (`env:` refs via `SecretProviderChain`, or `auth: backend` via the platform `tokenMediator`). No bespoke credential handling. Preconfiguration via **presets**. |
+| 5 | Runtime | **Node / TypeScript.** Pure-JS drivers + Node 24 built-in `node:sqlite`. |
+| 6 | Connections per instance | **One connection per instance.** Multiple DBs = multiple `mcp:sql` instances. |
+| 7 | Packaging / delivery | **No Nix recipe.** Bundle to a single `server.js`; ship as an `upstream_pointer` GitHub-release asset; run on the baseline `node`. |
+| 8 | Access enforcement | **Defense in depth** — tool-gating + statement classification + DB-level guarantee. |
+| 9 | Transactions | **In v1** — stateful `begin`/`commit`/`rollback`, single open tx per instance. |
+| 10 | Write-tool granularity | **Split** `execute` (DML) and `execute_ddl` (DDL), gated by separate scope tiers. |
+
+---
+
+## 2. Identity & placement
+
+- Catalog entry: `ai-assets/mcp/sql/MCP.md` (sibling to `xls/`, `ppt/`, `github/`).
+- Implementation: this repo, `skaile-ai/sql-mcp`, a flat submodule of the `skaile` parent (mirrors
+  `excel-mcp/`, `powerpoint-mcp/`).
+- Single unified server, dialect selected by config.
+
+## 3. Delivery & runtime (no Nix recipe)
+
+excel/ppt require Nix recipes because they bundle a JRE + LibreOffice — heavy native closures that
+must be delivered as pinned `/nix/store` paths into offline containers. A pure-JS SQL server has no
+such weight:
+
+- The baseline Nix closure already ships **`nodejs 24` + `bun`** on PATH; Node 24 has built-in
+  **`node:sqlite`** (zero native deps).
+- `pg`, `mysql2`, `tedious` are pure-JS and bundle into one file via `bun build`/esbuild (inlined,
+  **not** marked external — no runtime `node_modules`).
+
+**Delivery path (verified against the runner):**
+
+- The runner does **not** restrict an stdio server's `command` to `${recipe:...}` store paths — it
+  passes `command`/`args` verbatim to `StdioClientTransport`
+  (`workspaces/.../runner/src/external-mcp.ts`). Only `/nix/store/` paths get existence-validated.
+- MCP assets can carry **runnable payload files**: materialized as an `upstream_pointer` (GitHub
+  release) or `internal_blob`, every file lands under `.skaile/assets/mcp-server/<name>/` — exactly
+  as skills/connectors ship code today.
+
+Therefore the manifest runs the bundle on the baseline `node`:
+
+```yaml
+transport: stdio
+command: node
+args: ["<abs workspace path>/.skaile/assets/mcp-server/sql/server.js"]
+```
+
+The "build pipeline" is a single `bun build --target=node` step in this repo — **not** the
+platform's `nix-build.yml` CI, no flake stanza, no closure-size budget, no `import-recipe`/NAR
+machinery.
+
+> **First-in-catalog note:** there is no existing `command: node` MCP server in the catalog (today
+> it's Java-via-recipe or remote-HTTP). The infra supports it cleanly; document the pattern in
+> `ai-assets/mcp/DOMAIN.md` when publishing.
+
+## 4. Configuration surface
+
+All credentials and config ride existing workspace mechanisms — no parallel system.
+
+| Env var | Meaning |
+|---|---|
+| `SQL_MCP_DIALECT` | `postgres` \| `mysql` \| `sqlite` \| `mssql` |
+| `SQL_MCP_DSN` | Connection string, supplied via secret injection (`env:DATABASE_URL` → `SecretProviderChain`) or `auth: backend` via the platform `tokenMediator` (same dual path the Postgres connector uses). |
+| `SQL_MCP_ACCESS` | `readonly` \| `dml` \| `full` (the per-instance capability scope). |
+| `SQL_MCP_MAX_ROWS`, `SQL_MCP_MAX_RESULT_BYTES`, `SQL_MCP_STATEMENT_TIMEOUT_MS` | Optional overrides of the safety limits (§7). |
+
+- **Presets** carry preconfiguration: placeholders (e.g. DSN as a `secret`-typed placeholder,
+  dialect as an `enum`) folded into instance config via `materialize`.
+- Per-engine connection params (host/port/db/user) may alternatively be expressed as discrete
+  fields and assembled into a DSN internally — to be finalized in the plan.
+
+## 5. Connection model
+
+- **One connection per server instance**, pooled and health-checked on connect.
+- To expose several databases, the operator declares several `mcp:sql` instances, each with its own
+  `id`, dialect, DSN, and access scope. Tools take **no** connection argument.
+
+## 6. Tool surface
+
+Each tool declares its **intent**; the classifier (§7.2) verifies the submitted SQL matches that
+intent; the scope (§7.1) gates which tools are even registered.
+
+**Introspection — always available (all scopes):**
+
+- `sql.capabilities` — self-describe: dialect, driver version, **active access scope**, feature
+  flags, safety limits. Agent calls this first (cf. `ppt.capabilities`).
+- `sql.list_schemas` — schemas/databases visible to the connection.
+- `sql.list_tables` — tables + views (optionally scoped to a schema), with type.
+- `sql.describe_table` — columns, types, nullability, defaults, primary/foreign keys, indexes.
+
+**Read — always available:**
+
+- `sql.query` — parameterized `SELECT`. Returns `{columns, rows, rowCount, truncated}`. Runs inside
+  a DB-level **READ ONLY transaction**. Classifier rejects any non-read statement.
+
+**Write — `dml` and `full` scopes only:**
+
+- `sql.execute` — parameterized INSERT/UPDATE/DELETE. Returns `{rowCount}`. Classifier rejects DDL
+  and SELECT here.
+
+**Schema — `full` scope only:**
+
+- `sql.execute_ddl` — CREATE/ALTER/DROP/TRUNCATE. Separate tool so the highest-blast-radius
+  operations carry their own scope tier and are unreachable from a `dml` instance.
+
+**Transactions — scope-gated (write scopes):**
+
+- `sql.begin` / `sql.commit` / `sql.rollback` — stateful handle; **single open transaction per
+  instance**. Lets the agent group multi-statement DML atomically.
+
+## 7. Access enforcement — defense in depth
+
+1. **Tool-gating.** Out-of-scope tools are never registered. A `readonly` instance exposes no
+   `execute` / `execute_ddl` / transaction-write tools.
+2. **Statement classification.** Every submitted SQL string is parsed/classified (SELECT vs DML vs
+   DDL). A statement whose class doesn't match the calling tool, or is out of the instance's scope,
+   is rejected with `ACCESS_DENIED`. Multi-statement stacking (`;`) and comment-smuggling are
+   blocked regardless of scope.
+3. **DB-level guarantee.** Reads run in a READ ONLY transaction. Docs strongly recommend binding a
+   **read-only DB role** for `readonly` instances — the database is the last line of defense, not
+   the classifier.
+
+## 8. Result & safety limits
+
+Defaults below; all env-overridable and surfaced in `sql.capabilities`.
+
+| Limit | Default | Error code |
+|---|---|---|
+| `max_rows` | 1000 (hard cap 10 000) → `truncated: true` when clipped | — |
+| `max_result_bytes` | 10 MiB | `RESULT_TOO_LARGE` |
+| `statement_timeout_ms` | 30 000 (set per statement/tx) | `STATEMENT_TIMEOUT` |
+
+- **Parameterization is mandatory** — bind params as an array; no string interpolation of values.
+- **Type handling:** dates → ISO strings; `bigint`/wide numeric → string (JSON-safe); binary →
+  base64; SQL `NULL` → `null`.
+
+## 9. Error envelope
+
+Uniform structured envelope (cf. ppt):
+
+```json
+{
+  "status": "success" | "error",
+  "code": "VALIDATION_ERROR" | "ACCESS_DENIED" | "CONNECTION_FAILED" | "STATEMENT_TIMEOUT" | "RESULT_TOO_LARGE" | "DIALECT_UNSUPPORTED" | "TOOL_EXECUTION_ERROR",
+  "error": "human-readable message (only when status=error)",
+  "retriable": false,
+  "tool_name": "sql.query",
+  "data": { }
+}
+```
+
+## 10. Internal dialect abstraction
+
+A single `Dialect` interface, four implementations — the tool layer is dialect-agnostic.
+
+```
+interface Dialect {
+  connect(dsn): Pool/Handle
+  listSchemas(), listTables(schema?), describeTable(table)
+  beginReadOnly(), begin(), commit(), rollback()
+  query(sql, params), execute(sql, params)
+  classify(sql): 'select' | 'dml' | 'ddl' | 'other'   // or shared classifier + per-dialect quirks
+  coerceRow(row)                                        // dates/bigint/binary normalization
+  paramStyle: '$n' | '?' | '@p'
+}
+```
+
+Implementations: `pg` (Postgres), `mysql2` (MySQL), `tedious` (MSSQL), `node:sqlite` (SQLite).
+
+## 11. Extensibility — future engines
+
+The design splits future databases along one line: **relational (SQL) vs. not.**
+
+**Additional SQL engines (DuckDB, MariaDB, CockroachDB, Redshift, Snowflake, …) — supported by
+design.** The `Dialect` interface (§10) is the extension point. Adding an engine is: (1) a new
+`Dialect` implementation, (2) a new value in the `SQL_MCP_DIALECT` enum, (3) its driver dependency.
+The tool surface, statement classifier, scope enforcement, limits, and error envelope all carry over
+unchanged.
+
+- **Packaging caveat:** the no-Nix delivery decision (§3) rests on all current drivers being
+  *pure JS* (`pg`/`mysql2`/`tedious`/`node:sqlite`). An engine with a *native* driver (e.g.
+  DuckDB's `@duckdb/node-api` addon) reopens the packaging question — it would require shipping a
+  prebuilt native binary alongside the bundle or a thin Nix recipe for that engine. A **WASM**
+  runtime (e.g. `@duckdb/duckdb-wasm`) is the more promising path, since it preserves the
+  pure-bundle, no-native-addon story — to be evaluated if/when DuckDB is actually needed.
+
+**Non-relational engines (MongoDB, Redis, Elasticsearch, Neo4j, …) — deliberately out, as a
+sibling, not a retrofit.** They don't share the SQL tool surface (collections/BSON/aggregation vs.
+tables/`SELECT`; no SELECT/DML/DDL taxonomy), so forcing them behind `sql.*` tools would be a leaky
+abstraction. The server is named `sql` and its tools are `sql.*` precisely to signal "relational
+only." A future document/graph/kv store gets its **own** MCP server, which can reuse this server's
+*pattern* — config-selected backend, per-instance access scope, secret injection, no-Nix bundled-JS
+delivery — without stretching this one.
+
+## 12. Out of scope (v1)
+
+- Agent-supplied ad-hoc `connect` (config-only connections).
+- Multiple connections per instance.
+- Streaming / cursor results beyond `max_rows`.
+- Stored-procedure authoring, migrations, DAX, server-admin ops.
+
+## 13. Open items to pin during planning
+
+- Exact `${workspace}`-style absolute path token the materializer guarantees for the `args` path.
+- SQL parser/classifier choice per dialect (lightweight tokenizer vs. full parser) — must be robust
+  against comment/stacked-statement evasion.
+- MSSQL read-only-transaction semantics via `tedious`.
+- Whether to accept discrete connection fields (host/port/db/user) in addition to a single DSN.
+- Asset publication shape (`upstream_pointer` release artifact layout: `server.js` + manifest with
+  sha256).
