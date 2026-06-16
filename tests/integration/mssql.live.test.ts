@@ -12,15 +12,33 @@ const cfg = (dsn: string, access: Config["access"]): Config => ({
   maxRows: 2, maxResultBytes: 10_485_760, statementTimeoutMs: 30_000, cursorSecret: "s",
 });
 
-async function seed(dsn: string): Promise<void> {
-  const { Connection, Request } = await import("tedious");
+/** SQL Server logs "ready" before the SA login is usable on first boot; retry until it is. */
+async function connectWithRetry(dsn: string, attempts = 40, delayMs = 2_000): Promise<import("tedious").Connection> {
+  const { Connection } = await import("tedious");
   const u = new URL(dsn);
-  const conn = new Connection({
-    server: u.hostname,
-    options: { port: Number(u.port), database: "master", encrypt: true, trustServerCertificate: true },
-    authentication: { type: "default", options: { userName: u.username, password: decodeURIComponent(u.password) } },
-  });
-  await new Promise<void>((res, rej) => { conn.on("connect", (e) => (e ? rej(e) : res())); conn.connect(); });
+  let lastErr: unknown;
+  for (let i = 0; i < attempts; i++) {
+    const conn = new Connection({
+      server: u.hostname,
+      options: { port: Number(u.port), database: "master", encrypt: true, trustServerCertificate: true },
+      authentication: { type: "default", options: { userName: u.username, password: decodeURIComponent(u.password) } },
+    });
+    conn.on("error", () => {}); // avoid unhandled 'error' events crashing the process between retries
+    try {
+      await new Promise<void>((res, rej) => { conn.on("connect", (e) => (e ? rej(e) : res())); conn.connect(); });
+      return conn;
+    } catch (e) {
+      lastErr = e;
+      try { conn.close(); } catch { /* already closed */ }
+      await new Promise((r) => setTimeout(r, delayMs));
+    }
+  }
+  throw new Error(`mssql not ready after ${attempts} attempts: ${String(lastErr)}`);
+}
+
+async function seed(dsn: string): Promise<void> {
+  const { Request } = await import("tedious");
+  const conn = await connectWithRetry(dsn);
   const exec = (sql: string) =>
     new Promise<void>((res, rej) => { const r = new Request(sql, (e) => (e ? rej(e) : res())); conn.execSql(r); });
   await exec("CREATE TABLE users (id INT IDENTITY PRIMARY KEY, name NVARCHAR(64) NOT NULL)");
