@@ -201,11 +201,13 @@ Defaults below; all env-overridable and surfaced in `sql.capabilities`.
 | `max_result_bytes` | 10 MiB | `RESULT_TOO_LARGE` (hard error) |
 | `statement_timeout_ms` | 30 000 (per statement) | `STATEMENT_TIMEOUT` |
 
-- **Truncation is never silent.** When a read hits `max_rows`, the result sets `truncated: true`
-  **and** carries a `ROWS_TRUNCATED` warning, so an agent that ignores the flag still sees the
-  signal — important for counts/aggregations/existence checks. To read past `max_rows`, page with
-  the `next_cursor` keyset (§6a); it is the deliberate "get the rest" path. (`max_result_bytes` is a
-  hard error rather than a truncation because a half-serialized row can't be returned safely.)
+- **Truncation is never silent, and is distinct from pagination.** Two independent signals, either
+  / both / neither of which may be present: `next_cursor` means more rows are available — page on,
+  nothing is lost; `truncated: true` + a `ROWS_TRUNCATED` warning means the caller's *requested*
+  `limit` exceeded `max_rows` and was clipped to the cap (an agent that ignores the flag still sees
+  the signal — important for counts/aggregations/existence checks). To read past `max_rows`, page
+  with `next_cursor` (§6a) — the deliberate "get the rest" path. (`max_result_bytes` is a hard error
+  rather than a truncation because a half-serialized row can't be returned safely.)
 - **Parameterization is mandatory** — bind params as an array; no string interpolation of values.
   The server accepts a **canonical `$1`/`$2` placeholder style** and rewrites placeholders to the
   dialect-native form (`?` for MySQL/SQLite, `@pN` for MSSQL) before execution, so the agent never
