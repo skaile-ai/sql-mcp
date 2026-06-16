@@ -30,7 +30,9 @@ describe("MssqlDialect", () => {
   });
 
   it("query rolls back the read transaction (no READ ONLY modifier in MSSQL)", async () => {
-    const { exec, calls } = fakeExecutor((sql) => (sql.includes("SELECT id") ? [{ id: 1 }] : []));
+    const { exec, calls } = fakeExecutor((sql) =>
+      sql.includes("DATABASEPROPERTYEX") ? [{ u: "READ_ONLY" }] : sql.includes("SELECT id") ? [{ id: 1 }] : [],
+    );
     const d = new MssqlDialect("readonly", factory(exec));
     await d.connect("mssql://sa:p@h/db");
     const r = await d.query("SELECT id FROM users", []);
