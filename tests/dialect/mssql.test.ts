@@ -2,17 +2,17 @@ import { describe, it, expect } from "vitest";
 import { MssqlDialect, type MssqlExecutor, type MssqlExecutorFactory } from "../../src/dialect/mssql.js";
 
 interface Call { sql: string; params: unknown[]; }
-function fakeExecutor(rowsFor: (sql: string) => any[]): { exec: MssqlExecutor; calls: Call[] } {
+function fakeExecutor(rowsFor: (sql: string) => any[]): { exec: MssqlExecutor; calls: Call[]; tx: string[] } {
   const calls: Call[] = [];
+  const tx: string[] = [];
   const exec: MssqlExecutor = {
-    async run(sql, params) {
-      calls.push({ sql, params });
-      const rows = rowsFor(sql);
-      return { rows, rowCount: rows.length };
-    },
+    async run(sql, params) { calls.push({ sql, params }); const rows = rowsFor(sql); return { rows, rowCount: rows.length }; },
+    async beginTransaction() { tx.push("begin"); },
+    async commit() { tx.push("commit"); },
+    async rollback() { tx.push("rollback"); },
     async close() {},
   };
-  return { exec, calls };
+  return { exec, calls, tx };
 }
 const factory = (exec: MssqlExecutor): MssqlExecutorFactory => () => exec;
 
@@ -29,17 +29,15 @@ describe("MssqlDialect", () => {
     expect(d.supportsStatementTimeout).toBe(true);
   });
 
-  it("query rolls back the read transaction (no READ ONLY modifier in MSSQL)", async () => {
-    const { exec, calls } = fakeExecutor((sql) =>
+  it("query brackets the read in a transaction it always rolls back (no READ ONLY modifier in MSSQL)", async () => {
+    const { exec, tx } = fakeExecutor((sql) =>
       sql.includes("DATABASEPROPERTYEX") ? [{ u: "READ_ONLY" }] : sql.includes("SELECT id") ? [{ id: 1 }] : [],
     );
     const d = new MssqlDialect("readonly", factory(exec));
     await d.connect("mssql://sa:p@h/db");
     const r = await d.query("SELECT id FROM users", []);
     expect(r.columns).toEqual(["id"]);
-    const sqls = calls.map((c) => c.sql);
-    expect(sqls.some((s) => /BEGIN TRAN/i.test(s))).toBe(true);
-    expect(sqls.some((s) => /ROLLBACK/i.test(s))).toBe(true);
+    expect(tx).toEqual(["begin", "rollback"]);
   });
 
   it("quoteIdent bracket-quotes and rejects injection", () => {

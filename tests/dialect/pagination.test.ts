@@ -33,4 +33,12 @@ describe("dialect.paginate", () => {
     expect((p.match(/order by/gi) ?? []).length).toBe(1);
     expect(p).not.toMatch(/\(SELECT NULL\)/i);
   });
+
+  it("MSSQL injects ORDER BY (SELECT NULL) when ORDER BY appears only in a subquery", () => {
+    const p = new MssqlDialect("readonly", noop).paginate(
+      "SELECT * FROM users WHERE id IN (SELECT TOP 1 id FROM ref ORDER BY priority DESC)",
+      5, 0,
+    );
+    expect(p).toMatch(/ORDER BY \(SELECT NULL\) OFFSET 0 ROWS FETCH NEXT 5 ROWS ONLY/i);
+  });
 });

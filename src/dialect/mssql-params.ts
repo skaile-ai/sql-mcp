@@ -1,7 +1,9 @@
 // src/dialect/mssql-params.ts
 import { TYPES } from "tedious";
-// tedious does not re-export its `DataType` interface from the package root; this is a
-// type-only import (erased at build time, so it does not affect the bundle).
+// `TYPES` is a runtime value import, so `tedious` IS loaded when this module evaluates
+// (it is a regular dependency). The dialect's Connection/Request are still constructed
+// lazily inside defaultFactory. `DataType` is not re-exported from the package root, so we
+// take it type-only from the deep path (erased at build, zero bundle impact).
 import type { DataType as TediousType } from "tedious/lib/data-type.js";
 
 /** Rewrite canonical `$1,$2` placeholders to tedious named placeholders `@p1,@p2`. */
