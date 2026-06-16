@@ -9,8 +9,10 @@ function fakeDb(responses: Record<string, unknown[]>): SqliteDb {
     prepare(sql: string) {
       return {
         all: (..._params: unknown[]) => responses[sql.trim()] ?? [],
+        run: (..._params: unknown[]) => ({ changes: 0 }),
       };
     },
+    exec: (_sql: string) => {},
     close() {},
   };
 }

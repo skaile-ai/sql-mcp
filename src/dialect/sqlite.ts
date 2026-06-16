@@ -1,14 +1,16 @@
 // src/dialect/sqlite.ts
 import type { AccessScope } from "../config.js";
 import { assertValidIdent, quoteIdentAnsi } from "../identifiers.js";
-import type { ColumnInfo, Dialect, QueryResult, TableInfo } from "./types.js";
+import type { BatchStatement, ColumnInfo, Dialect, QueryResult, TableInfo } from "./types.js";
 
 // The slice of node:sqlite's DatabaseSync we depend on (kept tiny for testability).
 export interface SqliteStatement {
   all(...params: unknown[]): unknown[];
+  run(...params: unknown[]): { changes: number };
 }
 export interface SqliteDb {
   prepare(sql: string): SqliteStatement;
+  exec(sql: string): void;
   close(): void;
 }
 
@@ -60,6 +62,26 @@ export class SqliteDialect implements Dialect {
     const rows = this.require().prepare(sql).all(...params) as Record<string, unknown>[];
     const columns = rows.length > 0 ? Object.keys(rows[0]!) : [];
     return { columns, rows };
+  }
+
+  async execute(sql: string, params: unknown[]): Promise<{ rowCount: number }> {
+    const r = this.require().prepare(sql).run(...params);
+    return { rowCount: r.changes };
+  }
+
+  async executeBatch(statements: BatchStatement[]): Promise<Array<{ rowCount: number }>> {
+    const db = this.require();
+    db.exec("BEGIN");
+    try {
+      const results = statements.map((s) => ({
+        rowCount: db.prepare(s.sql).run(...(s.params ?? [])).changes,
+      }));
+      db.exec("COMMIT");
+      return results;
+    } catch (e) {
+      db.exec("ROLLBACK");
+      throw e;
+    }
   }
 
   async listSchemas(): Promise<string[]> {

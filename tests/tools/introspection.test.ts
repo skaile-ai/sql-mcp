@@ -15,6 +15,7 @@ const dialect: Dialect = {
   connect: async () => {}, close: async () => {},
   rewriteParams: (s) => s, quoteIdent: (n) => `"${n}"`,
   query: async () => ({ columns: [], rows: [] }),
+  execute: async () => ({ rowCount: 0 }), executeBatch: async () => [],
   listSchemas: async () => ["main"],
   listTables: async () => [{ name: "users", type: "table", schema: "main" }],
   describeTable: async () => [{ name: "id", type: "INTEGER", nullable: false, default: null, primaryKey: true }],

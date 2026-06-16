@@ -17,6 +17,7 @@ function dialectReturning(rows: Record<string, unknown>[]): Dialect {
     rewriteParams: (s) => s.replace(/\$\d+/g, "?"),
     quoteIdent: (n) => `"${n}"`,
     query: async (): Promise<QueryResult> => ({ columns: rows[0] ? Object.keys(rows[0]) : [], rows }),
+    execute: async () => ({ rowCount: 0 }), executeBatch: async () => [],
     listSchemas: async () => ["main"], listTables: async () => [], describeTable: async () => [],
   };
 }
