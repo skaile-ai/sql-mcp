@@ -837,3 +837,9 @@ git commit -m "test: live SQLite write integration (DML, atomic batch rollback, 
 - Handle-based transactions (`begin`/`commit`/`rollback`) and server-side cursors — broader-roadmap v2.
 - Postgres/MySQL/MSSQL adapters (Phase 3): wire `classify(sql, { extraDml: dialect.extraDml })` at the `handleExecute`/`handleExecuteBatch` callsites for `MERGE`; rewrite params on masked SQL; READ ONLY transactions on the read path.
 - Statement-timeout enforcement on SQLite (§13).
+- **(Phase 3) Broaden `scrub.ts` patterns** to cover `token=`, `api_key=`/`apikey=`, `secret=`,
+  `ssl_key=`/`sslpassword=` — these surface in Postgres/MySQL/MSSQL driver errors, not SQLite, so
+  added when the networked adapters land (Phase 2 review, Info).
+- **(Phase 3, optional) Make the `execute_batch` cap configurable.** Phase 2 hard-caps at
+  `MAX_BATCH_STATEMENTS = 100`; promote to a `SQL_MCP_MAX_BATCH_STATEMENTS` config + `capabilities`
+  limit if a real need appears (Phase 2 review, Low).
