@@ -20,7 +20,13 @@ export interface QueryResult {
   rows: Record<string, unknown>[];
 }
 
-/** Read subset of the Dialect contract (this phase). Write/transaction methods arrive in Phase 2. */
+export interface BatchStatement {
+  sql: string;
+  params?: unknown[];
+}
+
+/** Read + write subset of the Dialect contract. Handle-based transactions and server-side
+ *  cursors remain out of scope (v2 of the broader roadmap). */
 export interface Dialect {
   readonly name: DialectName;
   readonly paramStyle: "$n" | "?" | "@p";
@@ -31,6 +37,10 @@ export interface Dialect {
   /** Quote an identifier (caller has already allowlist-validated it). */
   quoteIdent(name: string): string;
   query(sql: string, params: unknown[]): Promise<QueryResult>;
+  /** Run one DML/DDL statement; returns the affected row count (0 for DDL). */
+  execute(sql: string, params: unknown[]): Promise<{ rowCount: number }>;
+  /** Run an ordered list of statements in a single transaction; rolls back atomically on error. */
+  executeBatch(statements: BatchStatement[]): Promise<Array<{ rowCount: number }>>;
   listSchemas(): Promise<string[]>;
   listTables(schema?: string): Promise<TableInfo[]>;
   describeTable(table: string, schema?: string): Promise<ColumnInfo[]>;

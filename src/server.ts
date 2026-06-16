@@ -3,7 +3,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { loadConfig } from "./config.js";
 import { createDialect } from "./dialect/index.js";
-import { registerReadTools } from "./tools/register.js";
+import { registerReadTools, registerWriteTools } from "./tools/register.js";
 import { SERVER_VERSION } from "./version.js";
 import { safeErrorMessage } from "./scrub.js";
 
@@ -14,6 +14,7 @@ async function main(): Promise<void> {
 
   const server = new McpServer({ name: "sql-mcp", version: SERVER_VERSION });
   registerReadTools(server, dialect, config);
+  registerWriteTools(server, dialect, config); // no-op for readonly; gates internally
 
   const transport = new StdioServerTransport();
   await server.connect(transport);
