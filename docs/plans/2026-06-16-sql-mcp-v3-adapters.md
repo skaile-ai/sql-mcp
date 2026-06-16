@@ -1742,4 +1742,7 @@ Co-Authored-By: Claude Opus 4.8 <noreply@anthropic.com>"
 - **v2 roadmap:** handle-based transactions (`begin`/`commit`/`rollback`) + server-side cursors (the shared pinned-connection engine).
 - **Configurable `execute_batch` cap** (`SQL_MCP_MAX_BATCH_STATEMENTS`) if a real need appears.
 - **Discrete connection fields** (host/port/user) as an alternative to a single DSN.
+- **Configurable pool size** (`SQL_MCP_PG_POOL_MAX` and per-dialect equivalents) — pg/mysql currently hardcode a small pool (spec §5). Add when concurrency tuning is actually needed.
+
+> **3a review carryover for 3b/3c:** route introspection reads through the same READ-ONLY-transaction helper as `query()` (pg added a private `withReadTx`). For MySQL, wrap `listSchemas`/`listTables`/`describeTable` in a `getConnection()` + `START TRANSACTION READ ONLY` helper too. Verify the readonly guarantee against the *session-default* flag, not the current-transaction flag (pg uses `SHOW default_transaction_read_only`).
 - **Keyset pagination** (ordering-key cursor) as an upgrade over offset, per spec §6a — offset is the v1 baseline.
