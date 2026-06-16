@@ -5,12 +5,25 @@ interface Call { sql: string; params: unknown[]; }
 
 function fakePool(responses: Record<string, { rows: any[]; rowCount?: number }>): { pool: PgPool; calls: Call[] } {
   const calls: Call[] = [];
+  const run = (sql: string, params: unknown[] = []) => {
+    calls.push({ sql, params });
+    // Match on a substring so the test can key off the meaningful statement.
+    const key = Object.keys(responses).find((k) => sql.includes(k));
+    return responses[key ?? ""] ?? { rows: [], rowCount: 0 };
+  };
   const pool: PgPool = {
+    // Transactions pin a single client; the fake records into the SAME calls array so
+    // assertions see the BEGIN/COMMIT that now flow through the pinned client.
+    async connect() {
+      return {
+        async query(sql: string, params: unknown[] = []) {
+          return run(sql, params);
+        },
+        release() {},
+      };
+    },
     async query(sql: string, params: unknown[] = []) {
-      calls.push({ sql, params });
-      // Match on a substring so the test can key off the meaningful statement.
-      const key = Object.keys(responses).find((k) => sql.includes(k));
-      return responses[key ?? ""] ?? { rows: [], rowCount: 0 };
+      return run(sql, params);
     },
     async end() {},
   };
@@ -44,10 +57,16 @@ describe("PostgresDialect", () => {
     const r = await d.query("SELECT id, name FROM users", []);
     expect(r.columns).toEqual(["id", "name"]);
     expect(r.rows).toHaveLength(2);
-    // The read must be bracketed by a READ ONLY transaction.
+    // The read must be bracketed by a READ ONLY transaction on the pinned client; with a
+    // single connection the order is BEGIN → SELECT → COMMIT (no interleaved pool query).
     const sqls = calls.map((c) => c.sql);
     expect(sqls).toContain("BEGIN TRANSACTION READ ONLY");
     expect(sqls).toContain("COMMIT");
+    const begin = sqls.indexOf("BEGIN TRANSACTION READ ONLY");
+    const select = sqls.findIndex((s) => s.includes("SELECT id"));
+    const commit = sqls.indexOf("COMMIT");
+    expect(begin).toBeLessThan(select);
+    expect(select).toBeLessThan(commit);
   });
 
   it("quoteIdent rejects injection and double-quotes valid names", () => {

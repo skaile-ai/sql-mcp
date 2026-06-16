@@ -6,8 +6,13 @@ import type { BatchStatement, ColumnInfo, Dialect, QueryResult, TableInfo } from
 
 // Minimal slice of node-postgres's Pool we depend on (keeps the dialect unit-testable).
 export interface PgQueryResult { rows: Record<string, unknown>[]; rowCount?: number | null; }
-export interface PgPool {
+export interface PgClient {
   query(sql: string, params?: unknown[]): Promise<PgQueryResult>;
+  release(): void;
+}
+export interface PgPool {
+  connect(): Promise<PgClient>;
+  query(sql: string, params?: unknown[]): Promise<PgQueryResult>; // single auto-commit statements only
   end(): Promise<void>;
 }
 export type PgPoolFactory = (dsn: string, opts: { readOnly: boolean; statementTimeoutMs: number }) => PgPool;
@@ -73,18 +78,20 @@ export class PostgresDialect implements Dialect {
   }
 
   async query(sql: string, params: unknown[]): Promise<QueryResult> {
-    const pool = this.require();
-    // Bracket the read in a READ ONLY transaction (defense in depth; harmless when the
-    // session already defaults to read-only).
-    await pool.query("BEGIN TRANSACTION READ ONLY");
+    const client = await this.require().connect();
     try {
-      const r = await pool.query(sql, params);
-      await pool.query("COMMIT");
+      // READ ONLY transaction on a single pinned connection (defense in depth; harmless
+      // when the session already defaults to read-only).
+      await client.query("BEGIN TRANSACTION READ ONLY");
+      const r = await client.query(sql, params);
+      await client.query("COMMIT");
       const columns = r.rows.length > 0 ? Object.keys(r.rows[0]!) : [];
       return { columns, rows: r.rows };
     } catch (e) {
-      try { await pool.query("ROLLBACK"); } catch { /* original error wins */ }
+      try { await client.query("ROLLBACK"); } catch { /* original error wins */ }
       throw e;
+    } finally {
+      client.release();
     }
   }
 
@@ -94,19 +101,21 @@ export class PostgresDialect implements Dialect {
   }
 
   async executeBatch(statements: BatchStatement[]): Promise<Array<{ rowCount: number }>> {
-    const pool = this.require();
-    await pool.query("BEGIN");
+    const client = await this.require().connect();
     try {
+      await client.query("BEGIN");
       const results: Array<{ rowCount: number }> = [];
       for (const s of statements) {
-        const r = await pool.query(s.sql, s.params ?? []);
+        const r = await client.query(s.sql, s.params ?? []);
         results.push({ rowCount: r.rowCount ?? 0 });
       }
-      await pool.query("COMMIT");
+      await client.query("COMMIT");
       return results;
     } catch (e) {
-      try { await pool.query("ROLLBACK"); } catch { /* original error wins */ }
+      try { await client.query("ROLLBACK"); } catch { /* original error wins */ }
       throw e;
+    } finally {
+      client.release();
     }
   }
 

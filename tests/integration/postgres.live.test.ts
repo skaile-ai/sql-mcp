@@ -72,4 +72,24 @@ describe.skipIf(!LIVE)("PostgreSQL live integration", () => {
     expect(env.data.rowCount).toBe(1);
     await d.close();
   });
+
+  it("executeBatch is atomic: a mid-batch failure rolls back the first statement", async () => {
+    const d = new PostgresDialect("dml", undefined, 30_000);
+    await d.connect(dsn);
+    const before = await d.query("SELECT count(*)::int AS n FROM users", []);
+    const beforeN = Number(before.rows[0]!.n);
+    // Second statement violates the PK (id is SERIAL PRIMARY KEY) → the whole batch
+    // must roll back, leaving the row inserted by the first statement gone.
+    await expect(
+      d.executeBatch([
+        { sql: "INSERT INTO users (name) VALUES ($1)", params: ["batch-atomic"] },
+        { sql: "INSERT INTO users (id, name) VALUES ($1, $2)", params: [1, "dup-pk"] },
+      ]),
+    ).rejects.toThrow();
+    const after = await d.query("SELECT count(*)::int AS n FROM users", []);
+    expect(Number(after.rows[0]!.n)).toBe(beforeN);
+    const named = await d.query("SELECT count(*)::int AS n FROM users WHERE name = $1", ["batch-atomic"]);
+    expect(Number(named.rows[0]!.n)).toBe(0);
+    await d.close();
+  });
 });
