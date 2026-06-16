@@ -43,10 +43,13 @@ function mask(sql: string): string {
       }
       out += " ";
     } else if (c === "[") {
-      // MSSQL bracket identifier
+      // MSSQL bracket identifier; ']]' is an escaped ']' (mirrors doubled-quote logic above).
       i++;
-      while (i < n && sql[i] !== "]") i++;
-      i++;
+      while (i < n) {
+        if (sql[i] === "]" && sql[i + 1] === "]") { i += 2; continue; } // doubled escape
+        if (sql[i] === "]") { i++; break; }
+        i++;
+      }
       out += " ";
     } else {
       out += c;

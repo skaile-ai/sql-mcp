@@ -3,8 +3,8 @@
 const PATTERNS: Array<[RegExp, string]> = [
   // URL-style DSN userinfo: scheme://user:PASSWORD@host  ->  scheme://user:***@host
   [/(\b[a-z][a-z0-9+.-]*:\/\/[^\s:/@]+:)[^\s@]+(@)/gi, "$1***$2"],
-  // key=value secrets: password=..., pwd=..., Password=...;
-  [/((?:password|pwd)\s*=\s*)[^;\s]+/gi, "$1***"],
+  // key=value secrets: password=..., passwd=..., pwd=..., pass=..., Password=...;
+  [/(\b(?:password|passwd|pwd|pass)\s*=\s*)[^;\s]+/gi, "$1***"],
   // Bearer tokens
   [/(\bBearer\s+)[A-Za-z0-9._\-]+/gi, "$1***"],
 ];

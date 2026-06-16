@@ -28,6 +28,7 @@ describe("introspection + capabilities", () => {
       dialect: "sqlite", access: "readonly",
       limits: { max_rows: 1000, max_result_bytes: 10_485_760, statement_timeout_ms: 30_000 },
     });
+    expect(env.data.feature_flags.statement_timeout).toBe(false);
   });
 
   it("list_tables returns the dialect's tables", async () => {

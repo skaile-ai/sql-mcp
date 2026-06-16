@@ -44,4 +44,9 @@ describe("classify", () => {
     // 'update' as a quoted identifier is masked, so it stays a select
     expect(classify('SELECT "update" FROM t').class).toBe("select");
   });
+
+  it("handles a doubled-bracket escape inside an MSSQL bracket identifier", () => {
+    // ']]' is an escaped ']'; the identifier is `x]delete`, so 'delete' must not leak.
+    expect(classify("SELECT * FROM [x]]delete]").class).toBe("select");
+  });
 });

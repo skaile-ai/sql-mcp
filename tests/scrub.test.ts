@@ -18,6 +18,15 @@ describe("scrubCredentials", () => {
     expect(scrubCredentials("Authorization: Bearer abc.def.ghi")).not.toContain("abc.def.ghi");
   });
 
+  it("masks broadened credential key variants", () => {
+    expect(scrubCredentials("passwd=hunter2")).not.toContain("hunter2");
+    expect(scrubCredentials("pass=hunter2")).not.toContain("hunter2");
+  });
+
+  it("does not match credential keys inside a longer word", () => {
+    expect(scrubCredentials("bypass=ok")).toBe("bypass=ok");
+  });
+
   it("leaves clean text untouched", () => {
     expect(scrubCredentials("table users not found")).toBe("table users not found");
   });

@@ -1,6 +1,7 @@
 // tests/tools/query.test.ts
 import { describe, it, expect } from "vitest";
 import { handleQuery } from "../../src/tools/query.js";
+import { encodeCursor } from "../../src/cursor.js";
 import type { Dialect, QueryResult } from "../../src/dialect/types.js";
 import type { Config } from "../../src/config.js";
 
@@ -48,5 +49,21 @@ describe("handleQuery", () => {
     const env = await handleQuery(d, config, { sql: "SELECT * FROM t" });
     if (env.status !== "success") throw new Error("expected success");
     expect(env.data.next_cursor).toBeUndefined();
+  });
+
+  it("treats a negative decoded cursor offset as 0", async () => {
+    let nativeSql = "";
+    const d: Dialect = {
+      ...dialectReturning([{ id: 1 }]),
+      query: async (sql: string): Promise<QueryResult> => {
+        nativeSql = sql;
+        return { columns: ["id"], rows: [{ id: 1 }] };
+      },
+    };
+    const cursor = encodeCursor({ mode: "offset", offset: -1 }, config.cursorSecret);
+    const env = await handleQuery(d, config, { sql: "SELECT * FROM t", cursor });
+    expect(env.status).toBe("success");
+    expect(nativeSql).toContain("OFFSET 0");
+    expect(nativeSql).not.toContain("OFFSET -1");
   });
 });

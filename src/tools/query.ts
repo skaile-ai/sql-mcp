@@ -5,6 +5,7 @@ import { classify } from "../classifier.js";
 import { encodeCursor, decodeCursor } from "../cursor.js";
 import { capRows } from "../limits.js";
 import { ok, err, type Envelope } from "../envelope.js";
+import { safeErrorMessage } from "../scrub.js";
 
 const TOOL = "sql.query";
 
@@ -48,9 +49,9 @@ export async function handleQuery(
   if (input.cursor) {
     try {
       const c = decodeCursor(input.cursor, config.cursorSecret);
-      offset = c.offset ?? 0;
+      offset = typeof c.offset === "number" && Number.isInteger(c.offset) && c.offset >= 0 ? c.offset : 0;
     } catch (e) {
-      return err(TOOL, "VALIDATION_ERROR", (e as Error).message);
+      return err(TOOL, "VALIDATION_ERROR", safeErrorMessage(e));
     }
   }
 
@@ -60,7 +61,7 @@ export async function handleQuery(
   try {
     result = await dialect.query(native, input.params ?? []);
   } catch (e) {
-    return err(TOOL, "TOOL_EXECUTION_ERROR", (e as Error).message);
+    return err(TOOL, "TOOL_EXECUTION_ERROR", safeErrorMessage(e));
   }
 
   const hasMore = result.rows.length > pageSize;
@@ -68,9 +69,10 @@ export async function handleQuery(
 
   let capped;
   try {
+    // capped.truncated is unused: pageRows is already bounded to pageSize; we rely on overCap.
     capped = capRows(pageRows, pageSize, config.maxResultBytes);
   } catch (e) {
-    const msg = (e as Error).message;
+    const msg = safeErrorMessage(e);
     if (msg.startsWith("RESULT_TOO_LARGE")) return err(TOOL, "RESULT_TOO_LARGE", msg);
     return err(TOOL, "TOOL_EXECUTION_ERROR", msg);
   }
@@ -79,6 +81,8 @@ export async function handleQuery(
     columns: result.columns,
     rows: capped.rows,
     rowCount: capped.rows.length,
+    // Two independent signals: `next_cursor` means more pages are available (page on);
+    // `truncated`/ROWS_TRUNCATED means the caller's requested limit exceeded max_rows and was clipped.
     truncated: overCap,
   };
   if (hasMore) {

@@ -5,6 +5,7 @@ import { loadConfig } from "./config.js";
 import { createDialect } from "./dialect/index.js";
 import { registerReadTools } from "./tools/register.js";
 import { SERVER_VERSION } from "./version.js";
+import { safeErrorMessage } from "./scrub.js";
 
 async function main(): Promise<void> {
   const config = loadConfig(process.env);
@@ -21,6 +22,6 @@ async function main(): Promise<void> {
 }
 
 main().catch((e) => {
-  process.stderr.write(`sql-mcp failed to start: ${(e as Error).message}\n`);
+  process.stderr.write(`sql-mcp failed to start: ${safeErrorMessage(e)}\n`);
   process.exit(1);
 });
