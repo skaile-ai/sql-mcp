@@ -25,7 +25,7 @@ const defaultFactory: PgPoolFactory = (dsn, opts) => {
     statement_timeout: opts.statementTimeoutMs,
     // DB-level read-only guarantee (spec §7.3): every transaction defaults to read-only.
     options: opts.readOnly ? "-c default_transaction_read_only=on" : undefined,
-    max: 4,
+    max: 4, // small pool per spec §5; a configurable cap (SQL_MCP_PG_POOL_MAX) is deferred — see plan carryover.
   }) as unknown as PgPool;
 };
 
@@ -47,8 +47,8 @@ export class PostgresDialect implements Dialect {
     if (this.access === "readonly") {
       // Confirm the read-only guarantee; warn (never throw) when it cannot be verified.
       try {
-        const r = await this.pool.query("SHOW transaction_read_only");
-        const val = (r.rows[0] as Record<string, unknown> | undefined)?.transaction_read_only;
+        const r = await this.pool.query("SHOW default_transaction_read_only");
+        const val = (r.rows[0] as Record<string, unknown> | undefined)?.default_transaction_read_only;
         if (val !== "on") {
           process.stderr.write("sql-mcp warning: postgres readonly instance could not confirm default_transaction_read_only=on\n");
         }
@@ -77,22 +77,28 @@ export class PostgresDialect implements Dialect {
     return quoteIdentAnsi(name);
   }
 
-  async query(sql: string, params: unknown[]): Promise<QueryResult> {
+  /** Run a read on a single pinned client inside a READ ONLY transaction. */
+  private async withReadTx<T>(fn: (client: PgClient) => Promise<T>): Promise<T> {
     const client = await this.require().connect();
     try {
-      // READ ONLY transaction on a single pinned connection (defense in depth; harmless
-      // when the session already defaults to read-only).
       await client.query("BEGIN TRANSACTION READ ONLY");
-      const r = await client.query(sql, params);
+      const out = await fn(client);
       await client.query("COMMIT");
-      const columns = r.rows.length > 0 ? Object.keys(r.rows[0]!) : [];
-      return { columns, rows: r.rows };
+      return out;
     } catch (e) {
       try { await client.query("ROLLBACK"); } catch { /* original error wins */ }
       throw e;
     } finally {
       client.release();
     }
+  }
+
+  async query(sql: string, params: unknown[]): Promise<QueryResult> {
+    return this.withReadTx(async (client) => {
+      const r = await client.query(sql, params);
+      const columns = r.rows.length > 0 ? Object.keys(r.rows[0]!) : [];
+      return { columns, rows: r.rows };
+    });
   }
 
   async execute(sql: string, params: unknown[]): Promise<{ rowCount: number }> {
@@ -120,35 +126,40 @@ export class PostgresDialect implements Dialect {
   }
 
   async listSchemas(): Promise<string[]> {
-    const r = await this.require().query(
-      "SELECT schema_name FROM information_schema.schemata WHERE schema_name NOT IN ('pg_catalog','information_schema') ORDER BY schema_name",
-    );
-    return r.rows.map((row) => String((row as Record<string, unknown>).schema_name));
+    return this.withReadTx(async (client) => {
+      const r = await client.query(
+        "SELECT schema_name FROM information_schema.schemata WHERE schema_name NOT IN ('pg_catalog','information_schema') ORDER BY schema_name",
+      );
+      return r.rows.map((row) => String((row as Record<string, unknown>).schema_name));
+    });
   }
 
   async listTables(schema?: string): Promise<TableInfo[]> {
-    const r = await this.require().query(
-      `SELECT table_schema, table_name, table_type FROM information_schema.tables
+    return this.withReadTx(async (client) => {
+      const r = await client.query(
+        `SELECT table_schema, table_name, table_type FROM information_schema.tables
        WHERE table_type IN ('BASE TABLE','VIEW')
          AND ($1::text IS NULL OR table_schema = $1)
          AND table_schema NOT IN ('pg_catalog','information_schema')
        ORDER BY table_schema, table_name`,
-      [schema ?? null],
-    );
-    return r.rows.map((row) => {
-      const rr = row as Record<string, unknown>;
-      return {
-        name: String(rr.table_name),
-        type: rr.table_type === "VIEW" ? ("view" as const) : ("table" as const),
-        schema: String(rr.table_schema),
-      };
+        [schema ?? null],
+      );
+      return r.rows.map((row) => {
+        const rr = row as Record<string, unknown>;
+        return {
+          name: String(rr.table_name),
+          type: rr.table_type === "VIEW" ? ("view" as const) : ("table" as const),
+          schema: String(rr.table_schema),
+        };
+      });
     });
   }
 
   async describeTable(table: string, schema?: string): Promise<ColumnInfo[]> {
     assertValidIdent(table); // value-bound below, but validate early (defense in depth)
-    const r = await this.require().query(
-      `SELECT c.column_name, c.data_type, c.is_nullable, c.column_default,
+    return this.withReadTx(async (client) => {
+      const r = await client.query(
+        `SELECT c.column_name, c.data_type, c.is_nullable, c.column_default,
               (pk.column_name IS NOT NULL) AS is_pk
          FROM information_schema.columns c
          LEFT JOIN (
@@ -156,22 +167,23 @@ export class PostgresDialect implements Dialect {
              FROM information_schema.table_constraints tc
              JOIN information_schema.key_column_usage kcu
                ON kcu.constraint_name = tc.constraint_name AND kcu.table_schema = tc.table_schema
-            WHERE tc.constraint_type = 'PRIMARY KEY' AND tc.table_name = $1
+            WHERE tc.constraint_type = 'PRIMARY KEY' AND tc.table_name = $1 AND kcu.table_name = $1
               AND ($2::text IS NULL OR tc.table_schema = $2)
          ) pk ON pk.column_name = c.column_name
         WHERE c.table_name = $1 AND ($2::text IS NULL OR c.table_schema = $2)
         ORDER BY c.ordinal_position`,
-      [table, schema ?? null],
-    );
-    return r.rows.map((row) => {
-      const rr = row as Record<string, unknown>;
-      return {
-        name: String(rr.column_name),
-        type: String(rr.data_type),
-        nullable: rr.is_nullable === "YES",
-        default: rr.column_default == null ? null : String(rr.column_default),
-        primaryKey: rr.is_pk === true,
-      };
+        [table, schema ?? null],
+      );
+      return r.rows.map((row) => {
+        const rr = row as Record<string, unknown>;
+        return {
+          name: String(rr.column_name),
+          type: String(rr.data_type),
+          nullable: rr.is_nullable === "YES",
+          default: rr.column_default == null ? null : String(rr.column_default),
+          primaryKey: rr.is_pk === true,
+        };
+      });
     });
   }
 }

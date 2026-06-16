@@ -7,6 +7,10 @@ function fakePool(responses: Record<string, { rows: any[]; rowCount?: number }>)
   const calls: Call[] = [];
   const run = (sql: string, params: unknown[] = []) => {
     calls.push({ sql, params });
+    // Silence the readonly-verification warning in unit runs by confirming the GUC.
+    if (sql.includes("default_transaction_read_only")) {
+      return { rows: [{ default_transaction_read_only: "on" }] };
+    }
     // Match on a substring so the test can key off the meaningful statement.
     const key = Object.keys(responses).find((k) => sql.includes(k));
     return responses[key ?? ""] ?? { rows: [], rowCount: 0 };
@@ -65,6 +69,24 @@ describe("PostgresDialect", () => {
     const begin = sqls.indexOf("BEGIN TRANSACTION READ ONLY");
     const select = sqls.findIndex((s) => s.includes("SELECT id"));
     const commit = sqls.indexOf("COMMIT");
+    expect(begin).toBeLessThan(select);
+    expect(select).toBeLessThan(commit);
+  });
+
+  it("introspection reads run inside a READ ONLY transaction", async () => {
+    const { pool, calls } = fakePool({
+      "FROM information_schema.tables": { rows: [{ table_schema: "public", table_name: "users", table_type: "BASE TABLE" }] },
+    });
+    const d = new PostgresDialect("readonly", factory(pool));
+    await d.connect("postgresql://u:p@h/db");
+    const tables = await d.listTables();
+    expect(tables).toHaveLength(1);
+    const sqls = calls.map((c) => c.sql);
+    expect(sqls).toContain("BEGIN TRANSACTION READ ONLY");
+    expect(sqls).toContain("COMMIT");
+    const begin = sqls.indexOf("BEGIN TRANSACTION READ ONLY");
+    const select = sqls.findIndex((s) => s.includes("FROM information_schema.tables"));
+    const commit = sqls.lastIndexOf("COMMIT");
     expect(begin).toBeLessThan(select);
     expect(select).toBeLessThan(commit);
   });
