@@ -84,7 +84,8 @@ All credentials and config ride existing workspace mechanisms — no parallel sy
 | `SQL_MCP_DIALECT` | `postgres` \| `mysql` \| `sqlite` \| `mssql` |
 | `SQL_MCP_DSN` | Connection string, supplied via secret injection (`env:DATABASE_URL` → `SecretProviderChain`) or `auth: backend` via the platform `tokenMediator` (same dual path the Postgres connector uses). |
 | `SQL_MCP_ACCESS` | `readonly` \| `dml` \| `full` (the per-instance capability scope). |
-| `SQL_MCP_MAX_ROWS`, `SQL_MCP_MAX_RESULT_BYTES`, `SQL_MCP_STATEMENT_TIMEOUT_MS` | Optional overrides of the safety limits (§7). |
+| `SQL_MCP_CURSOR_SECRET` | Optional. Server-held key used to integrity-protect `next_cursor` tokens (§6a). When unset, the key is derived deterministically from the DSN, so tokens stay valid across restarts; set it explicitly to control rotation or when the DSN itself rotates. Supplied via secret injection like `SQL_MCP_DSN`. |
+| `SQL_MCP_MAX_ROWS`, `SQL_MCP_MAX_RESULT_BYTES`, `SQL_MCP_STATEMENT_TIMEOUT_MS` | Optional overrides of the safety limits (§8). |
 
 - **Presets** carry preconfiguration: placeholders (e.g. DSN as a `secret`-typed placeholder,
   dialect as an `enum`) folded into instance config via `materialize`.
@@ -139,21 +140,25 @@ intent; the scope (§7.1) gates which tools are even registered.
 
 **Schema — `full` scope only:**
 
-- `sql.execute_ddl` — CREATE/ALTER/DROP/TRUNCATE. Separate tool so the highest-blast-radius
-  operations carry their own scope tier and are unreachable from a `dml` instance.
+- `sql.execute_ddl` — CREATE/ALTER/DROP/TRUNCATE. Classifier rejects DML and SELECT here. Separate
+  tool so the highest-blast-radius operations carry their own scope tier and are unreachable from a
+  `dml` instance.
 
 ## 6a. Pagination & state model
 
 - **Stateless keyset pagination.** `next_cursor` is an opaque, self-contained token encoding the
   ordering key + last-seen value (preferred) or an offset (fallback when no orderable key exists).
-  The agent passes it back to `sql.query` to get the next page. Nothing is pinned server-side, so
-  pages survive process restarts and never leak connections. Trade-offs: keyset needs an orderable
-  key; pages are not snapshot-consistent (data may shift between pages).
-- **Cursor tokens MUST be integrity-protected** (HMAC or authenticated encryption with a
-  server-held key). The token feeds the `keysetPredicate` WHERE clause, so an unsigned token is a
-  blind-injection oracle — a caller could craft a cursor to inject arbitrary values into the query.
-  The server rejects any token that fails verification. (This is a security requirement, not just a
-  format choice.)
+  The agent passes it back to `sql.query` to get the next page. No DB-side cursor is held and no
+  connection is pinned; pages survive process restarts **provided the cursor secret is stable**
+  (see below). Trade-offs: keyset needs an orderable key; pages are not snapshot-consistent (data
+  may shift between pages).
+- **Cursor tokens MUST be integrity-protected** (HMAC or authenticated encryption) with the
+  **server-held `SQL_MCP_CURSOR_SECRET`** key (§4). The token feeds the `keysetPredicate` WHERE
+  clause, so an unsigned token is a blind-injection oracle — a caller could craft a cursor to inject
+  arbitrary values into the query. The server rejects any token that fails verification. Because the
+  key defaults to a deterministic derivation from the DSN (rather than a random per-process value),
+  tokens remain valid across restarts; rotating the key (or the DSN) intentionally invalidates
+  outstanding cursors. (This is a security requirement, not just a format choice.)
 - **Offset fallback is O(n) and must be flagged.** When no orderable key exists and the cursor falls
   back to `OFFSET`, the database scans and discards the first N rows on every page. The result
   carries a warning when the offset fallback is active; it should only be used when the total page
