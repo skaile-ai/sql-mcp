@@ -6,11 +6,10 @@ on:
 
 jobs:
   claude-review:
-    # Self-hosted runner (label `claude`) to match the platform repo and consume
-    # zero GitHub-hosted Actions minutes. Requires this repo to be in the org
-    # runner group's access list; if the review never picks up a runner, either
-    # add the repo to the runner group or switch this to `ubuntu-latest`.
-    runs-on: [self-hosted, claude]
+    # GitHub-hosted runner. The platform repo uses a self-hosted `[self-hosted, claude]`
+    # runner for zero billed minutes; switch to that once this repo is added to the
+    # org runner group's access list (until then a self-hosted job queues forever).
+    runs-on: ubuntu-latest
     permissions:
       contents: read
       pull-requests: write
