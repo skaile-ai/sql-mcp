@@ -18,9 +18,9 @@ export interface MysqlPool {
   query(sql: string, params?: unknown[]): Promise<MysqlQueryReturn>; // single auto-commit statements only
   end(): Promise<void>;
 }
-export type MysqlPoolFactory = (dsn: string, opts: { readOnly: boolean; statementTimeoutMs: number }) => MysqlPool;
+export type MysqlPoolFactory = (dsn: string) => MysqlPool;
 
-const defaultFactory: MysqlPoolFactory = (dsn, opts) => {
+const defaultFactory: MysqlPoolFactory = (dsn) => {
   const mysql = require("mysql2/promise") as typeof import("mysql2/promise");
   const pool = mysql.createPool({
     uri: dsn,
@@ -30,11 +30,6 @@ const defaultFactory: MysqlPoolFactory = (dsn, opts) => {
     bigNumberStrings: true,
     decimalNumbers: false,
   });
-  // Apply per-connection session settings as connections are created.
-  (pool as unknown as { on: (e: string, cb: (c: any) => void) => void }).on("connection", (conn: any) => {
-    conn.query(`SET SESSION max_execution_time = ${Math.max(0, Math.floor(opts.statementTimeoutMs))}`);
-    if (opts.readOnly) conn.query("SET SESSION TRANSACTION READ ONLY");
-  });
   return pool as unknown as MysqlPool;
 };
 
@@ -42,7 +37,7 @@ export class MysqlDialect implements Dialect {
   readonly name = "mysql" as const;
   readonly paramStyle = "?" as const;
   readonly classifyHooks: ClassifyHooks = {}; // MySQL has no MERGE
-  readonly supportsStatementTimeout = true; // via SET SESSION max_execution_time (SELECT statements)
+  readonly supportsStatementTimeout = true; // SELECT only, via max_execution_time (MySQL has no DML/DDL statement timeout)
   private pool: MysqlPool | null = null;
 
   constructor(
@@ -52,7 +47,7 @@ export class MysqlDialect implements Dialect {
   ) {}
 
   async connect(dsn: string): Promise<void> {
-    this.pool = this.factory(dsn, { readOnly: this.access === "readonly", statementTimeoutMs: this.statementTimeoutMs });
+    this.pool = this.factory(dsn);
     if (this.access === "readonly") {
       // MySQL has no inspectable session-level read-only role flag; the DB-level guarantee is a
       // read-only grant. Surface that expectation rather than implying enforcement we can't verify.
@@ -79,10 +74,17 @@ export class MysqlDialect implements Dialect {
     return quoteIdentMysql(name);
   }
 
-  /** Run a read on a single pinned connection inside a READ ONLY transaction. */
+  /**
+   * Run a read on a single pinned connection inside a READ ONLY transaction.
+   * The READ ONLY bracket is intentional defense-in-depth applied regardless of access scope —
+   * do not drop it for dml/full instances.
+   */
   private async withReadTx<T>(fn: (conn: MysqlConnection) => Promise<T>): Promise<T> {
     const conn = await this.require().getConnection();
     try {
+      // Statement timeout applies to SELECT via max_execution_time; set it on the pinned
+      // connection so it is guaranteed applied (the pool 'connection' event was racy + swallowed errors).
+      await conn.query(`SET SESSION max_execution_time = ${Math.max(0, Math.floor(this.statementTimeoutMs))}`);
       await conn.query("START TRANSACTION READ ONLY");
       const out = await fn(conn);
       await conn.query("COMMIT");

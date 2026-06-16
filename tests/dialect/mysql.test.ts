@@ -2,7 +2,8 @@ import { describe, it, expect } from "vitest";
 import { MysqlDialect, type MysqlPool, type MysqlPoolFactory } from "../../src/dialect/mysql.js";
 
 interface Call { sql: string; params: unknown[]; }
-function fakePool(rowsFor: (sql: string) => any[]): { pool: MysqlPool; calls: Call[] } {
+// rowsFor returns either a row array (SELECT) or a ResultSetHeader-like object ({ affectedRows }).
+function fakePool(rowsFor: (sql: string) => any): { pool: MysqlPool; calls: Call[] } {
   const calls: Call[] = [];
   const run = (sql: string, params: unknown[] = []) => {
     calls.push({ sql, params });
@@ -71,6 +72,45 @@ describe("MysqlDialect", () => {
     const commit = sqls.lastIndexOf("COMMIT");
     expect(begin).toBeLessThan(select);
     expect(select).toBeLessThan(commit);
+  });
+
+  it("execute returns affectedRows as rowCount via pool.query (auto-commit)", async () => {
+    const { pool, calls } = fakePool((sql) =>
+      sql.includes("UPDATE users") ? { affectedRows: 3 } : [],
+    );
+    const d = new MysqlDialect("dml", factory(pool));
+    await d.connect("mysql://u:p@h/db");
+    const r = await d.execute("UPDATE users SET name = ? WHERE id = ?", ["x", 1]);
+    expect(r).toEqual({ rowCount: 3 });
+    // No transaction bracket — auto-commit via pool.query().
+    const sqls = calls.map((c) => c.sql);
+    expect(sqls).not.toContain("START TRANSACTION");
+    expect(sqls).toContain("UPDATE users SET name = ? WHERE id = ?");
+  });
+
+  it("executeBatch wraps statements in START TRANSACTION / COMMIT and returns aligned rowCounts", async () => {
+    const { pool, calls } = fakePool((sql) => {
+      if (sql.includes("INSERT")) return { affectedRows: 1 };
+      if (sql.includes("UPDATE")) return { affectedRows: 2 };
+      return [];
+    });
+    const d = new MysqlDialect("dml", factory(pool));
+    await d.connect("mysql://u:p@h/db");
+    const results = await d.executeBatch([
+      { sql: "INSERT INTO t (a) VALUES (?)", params: [1] },
+      { sql: "UPDATE t SET a = ?", params: [2] },
+    ]);
+    expect(results).toEqual([{ rowCount: 1 }, { rowCount: 2 }]);
+    const sqls = calls.map((c) => c.sql);
+    expect(sqls).toContain("START TRANSACTION");
+    expect(sqls).toContain("COMMIT");
+    const begin = sqls.indexOf("START TRANSACTION");
+    const commit = sqls.indexOf("COMMIT");
+    const insert = sqls.findIndex((s) => s.includes("INSERT"));
+    const update = sqls.findIndex((s) => s.includes("UPDATE"));
+    expect(begin).toBeLessThan(insert);
+    expect(insert).toBeLessThan(update);
+    expect(update).toBeLessThan(commit);
   });
 
   it("quoteIdent backtick-quotes and rejects injection", () => {
