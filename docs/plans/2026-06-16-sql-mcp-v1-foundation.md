@@ -1897,3 +1897,18 @@ git commit -m "build: produce dist/server.js bundle (phase 1 read-only sqlite)"
 1. **Phase 2 — Write scope on SQLite.** Extend the `Dialect` interface with `execute`, `executeBatch` (classify-all-before-BEGIN, positional-array return), and `quoteIdent`-backed DDL; add `sql.execute` (dml/full), `sql.execute_batch` (dml/full), `sql.execute_ddl` (full); scope-gated registration; statement-timeout enforcement (SQLite via `sqlite3_interrupt` on a timer, per §13).
 2. **Phase 3 — Postgres / MySQL / MSSQL adapters.** One `Dialect` per engine (`pg`, `mysql2`, `tedious`), a small connection pool, READ ONLY transactions for the read path, `rewriteParams` to `?`/`@pN`, dialect introspection SQL, integration tests via testcontainers. Confirm `tedious` (CJS) bundles cleanly (§13).
 3. **Phase 4 — Catalog entry + release.** Author `ai-assets/mcp/sql/MCP.md` (manifest + agent guidance), document the first-JS-server pattern in `ai-assets/mcp/DOMAIN.md`, and ship `v0.1.0` via the tag-driven `release.yml` (bundle + sha256 manifest as an `upstream_pointer` asset).
+
+### Carryover from Phase 1 review (non-blocking; address in the phase noted)
+
+- **(Phase 2/3) `rewriteParams` rewrites `$n` inside string literals.** The SQLite `$1`→`?`
+  rewrite is a blanket regex over the whole SQL string, so a literal like `SELECT '$1'` becomes
+  `SELECT '?'`. Rare in practice, but when building the multi-dialect rewrite, operate on
+  comment/string-masked SQL (reuse the classifier's `mask()`) or a real parse step rather than a
+  blanket replace.
+- **(Phase 2/3) Wire dialect classifier hooks at the `handleQuery`/write-tool callsites.** `classify()`
+  is currently called with no hooks, so `MERGE` falls to `other` (safely rejected by read tools).
+  When MSSQL lands, pass `{ extraDml: dialect.extraDml }` (and any DDL hooks) so `MERGE`/dialect-
+  specific verbs classify correctly across all tools.
+- **(Phase 2, optional) `capRows`'s `truncated` return is unused by `sql.query`** (which derives
+  truncation from `overCap`). It remains a unit-tested general utility; decide whether a future
+  direct-fetch callsite needs it, or drop the field, when `capRows` gets a second consumer.
