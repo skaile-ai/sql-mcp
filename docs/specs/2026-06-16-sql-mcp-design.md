@@ -25,8 +25,10 @@ pattern than the Java/POI servers.
 | 6 | Connections per instance | **One connection per instance.** Multiple DBs = multiple `mcp:sql` instances. |
 | 7 | Packaging / delivery | **No Nix recipe.** Bundle to a single `server.js`; ship as an `upstream_pointer` GitHub-release asset; run on the baseline `node`. |
 | 8 | Access enforcement | **Defense in depth** — tool-gating + statement classification + DB-level guarantee. |
-| 9 | Transactions | **In v1** — stateful `begin`/`commit`/`rollback`, single open tx per instance. |
+| 9 | Transactions | **Stateless atomic batch in v1** (`sql.execute_batch` — `BEGIN`/…/`COMMIT` in one call). Handle-based `begin`/`commit`/`rollback` deferred to v2. |
 | 10 | Write-tool granularity | **Split** `execute` (DML) and `execute_ddl` (DDL), gated by separate scope tiers. |
+| 11 | Large reads | **Stateless keyset pagination** on `sql.query` (`next_cursor`). Server-side DB cursors deferred to v2. |
+| 12 | Cross-call state | **None in v1.** The server holds only the connection pool — no pinned-connection handles, so no idle-tx/cursor lifecycle to manage. |
 
 ---
 
@@ -110,23 +112,38 @@ intent; the scope (§7.1) gates which tools are even registered.
 
 **Read — always available:**
 
-- `sql.query` — parameterized `SELECT`. Returns `{columns, rows, rowCount, truncated}`. Runs inside
-  a DB-level **READ ONLY transaction**. Classifier rejects any non-read statement.
+- `sql.query` — parameterized `SELECT`. Returns `{columns, rows, rowCount, truncated, next_cursor}`.
+  Runs inside a DB-level **READ ONLY transaction**. Classifier rejects any non-read statement.
+  Supports **stateless keyset pagination**: pass an opaque `cursor` (and optional `limit`) to fetch
+  the next page; the server returns `next_cursor` until the result is exhausted. This is the
+  deliberate path to read beyond `max_rows` — no server-side cursor state is held (see §6a).
 
 **Write — `dml` and `full` scopes only:**
 
 - `sql.execute` — parameterized INSERT/UPDATE/DELETE. Returns `{rowCount}`. Classifier rejects DDL
-  and SELECT here.
+  and SELECT here. Each call auto-commits (no open transaction is held across calls).
+- `sql.execute_batch` — an **ordered array** of parameterized DML statements run atomically as a
+  single `BEGIN`/…/`COMMIT` **within one tool call** (rolled back as a whole on any failure).
+  Returns per-statement `{rowCount}`. This is v1's transaction primitive — it gives multi-statement
+  atomicity with **zero cross-call state**. (It cannot branch on intermediate results mid-transaction;
+  that needs handle-based transactions — deferred to v2, see §12.)
 
 **Schema — `full` scope only:**
 
 - `sql.execute_ddl` — CREATE/ALTER/DROP/TRUNCATE. Separate tool so the highest-blast-radius
   operations carry their own scope tier and are unreachable from a `dml` instance.
 
-**Transactions — scope-gated (write scopes):**
+## 6a. Pagination & state model
 
-- `sql.begin` / `sql.commit` / `sql.rollback` — stateful handle; **single open transaction per
-  instance**. Lets the agent group multi-statement DML atomically.
+- **Stateless keyset pagination.** `next_cursor` is an opaque, self-contained token encoding the
+  ordering key + last-seen value (preferred) or an offset (fallback when no orderable key exists).
+  The agent passes it back to `sql.query` to get the next page. Nothing is pinned server-side, so
+  pages survive process restarts and never leak connections. Trade-offs: keyset needs an orderable
+  key; deep `OFFSET` is inefficient; pages are not snapshot-consistent (data may shift between pages).
+- **No cross-call logical state in v1.** The server holds only the connection pool. There are no
+  pinned-connection handles, so there is no idle-transaction timeout, single-flight gate, or handle
+  registry to manage. Handle-based transactions and server-side DB cursors (which both require that
+  machinery, and share it) are deferred to v2.
 
 ## 7. Access enforcement — defense in depth
 
@@ -177,11 +194,14 @@ A single `Dialect` interface, four implementations — the tool layer is dialect
 interface Dialect {
   connect(dsn): Pool/Handle
   listSchemas(), listTables(schema?), describeTable(table)
-  beginReadOnly(), begin(), commit(), rollback()
-  query(sql, params), execute(sql, params)
+  query(sql, params, page?)         // read inside an internal READ ONLY tx; page = keyset/offset
+  execute(sql, params)              // single auto-committed DML
+  executeBatch(statements[])        // one BEGIN/…/COMMIT within the call (v1 atomicity primitive)
+  // v2: beginTx()/commit()/rollback() handle + openCursor()/fetch()/close() — not in v1
   classify(sql): 'select' | 'dml' | 'ddl' | 'other'   // or shared classifier + per-dialect quirks
   coerceRow(row)                                        // dates/bigint/binary normalization
   paramStyle: '$n' | '?' | '@p'
+  keysetPredicate(orderKey, lastValue)                  // build the WHERE/ORDER for next_cursor
 }
 ```
 
@@ -212,11 +232,20 @@ only." A future document/graph/kv store gets its **own** MCP server, which can r
 *pattern* — config-selected backend, per-instance access scope, secret injection, no-Nix bundled-JS
 delivery — without stretching this one.
 
-## 12. Out of scope (v1)
+## 12. Out of scope (v1) — and the v2 line
 
-- Agent-supplied ad-hoc `connect` (config-only connections).
+Deferred to v2 (all share the cross-call pinned-connection + handle-lifecycle engine, so they land
+together once a concrete need justifies building it):
+
+- **Handle-based transactions** — `begin`/`commit`/`rollback` across calls (branch on intermediate
+  results mid-transaction). v1 covers atomicity with the stateless `sql.execute_batch` instead.
+- **Server-side DB cursors** — `open`/`fetch`/`close` portals for snapshot-consistent, efficient
+  deep iteration. v1 covers large reads with stateless keyset pagination on `sql.query` instead.
+
+Out of scope entirely (v1):
+
+- Agent-supplied ad-hoc `connect` (connections are config-only).
 - Multiple connections per instance.
-- Streaming / cursor results beyond `max_rows`.
 - Stored-procedure authoring, migrations, DAX, server-admin ops.
 
 ## 13. Open items to pin during planning
@@ -225,6 +254,9 @@ delivery — without stretching this one.
 - SQL parser/classifier choice per dialect (lightweight tokenizer vs. full parser) — must be robust
   against comment/stacked-statement evasion.
 - MSSQL read-only-transaction semantics via `tedious`.
+- Keyset pagination: how `next_cursor` picks the ordering key when the query has no obvious unique
+  key (fall back to `OFFSET`? require an `ORDER BY`? derive from PK?), and the token's encoding +
+  tamper-resistance.
 - Whether to accept discrete connection fields (host/port/db/user) in addition to a single DSN.
 - Asset publication shape (`upstream_pointer` release artifact layout: `server.js` + manifest with
   sha256).
