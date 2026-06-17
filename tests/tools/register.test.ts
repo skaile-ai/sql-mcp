@@ -11,7 +11,9 @@ const config: Config = {
 const dialect: Dialect = {
   name: "sqlite", paramStyle: "?", classifyHooks: {}, supportsStatementTimeout: false,
   connect: async () => {}, close: async () => {},
-  rewriteParams: (s) => s, quoteIdent: (n) => `"${n}"`,
+  rewriteParams: (s) => s,
+  paginate: (sql, limit, offset) => `SELECT * FROM (${sql.replace(/;\s*$/, "")}) AS _page LIMIT ${limit} OFFSET ${offset}`,
+  quoteIdent: (n) => `"${n}"`,
   query: async () => ({ columns: ["n"], rows: [{ n: 1 }] }),
   execute: async () => ({ rowCount: 0 }), executeBatch: async () => [],
   listSchemas: async () => ["main"], listTables: async () => [], describeTable: async () => [],

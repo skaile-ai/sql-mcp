@@ -24,12 +24,6 @@ export interface QueryData {
   next_cursor?: string;
 }
 
-/** Wrap arbitrary user SELECT SQL as a sub-select so we can apply LIMIT/OFFSET uniformly. */
-function paginate(sql: string, limit: number, offset: number): string {
-  const trimmed = sql.replace(/;\s*$/, "");
-  return `SELECT * FROM (${trimmed}) AS _page LIMIT ${limit} OFFSET ${offset}`;
-}
-
 export async function handleQuery(
   dialect: Dialect,
   config: Config,
@@ -56,7 +50,7 @@ export async function handleQuery(
   }
 
   // Fetch one extra row to detect whether a further page exists.
-  const native = dialect.rewriteParams(paginate(input.sql, pageSize + 1, offset));
+  const native = dialect.rewriteParams(dialect.paginate(input.sql, pageSize + 1, offset));
   let result;
   try {
     result = await dialect.query(native, input.params ?? []);

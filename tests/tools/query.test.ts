@@ -17,6 +17,8 @@ function dialectReturning(rows: Record<string, unknown>[]): Dialect {
     supportsStatementTimeout: false,
     connect: async () => {}, close: async () => {},
     rewriteParams: (s) => s.replace(/\$\d+/g, "?"),
+    paginate: (sql: string, limit: number, offset: number) =>
+      `SELECT * FROM (${sql.replace(/;\s*$/, "")}) AS _page LIMIT ${limit} OFFSET ${offset}`,
     quoteIdent: (n) => `"${n}"`,
     query: async (): Promise<QueryResult> => ({ columns: rows[0] ? Object.keys(rows[0]) : [], rows }),
     execute: async () => ({ rowCount: 0 }), executeBatch: async () => [],

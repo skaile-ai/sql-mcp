@@ -7,7 +7,9 @@ import type { Config, AccessScope } from "../../src/config.js";
 const dialect: Dialect = {
   name: "sqlite", paramStyle: "?", classifyHooks: {}, supportsStatementTimeout: false,
   connect: async () => {}, close: async () => {},
-  rewriteParams: (s) => s, quoteIdent: (n) => `"${n}"`,
+  rewriteParams: (s) => s,
+  paginate: (sql, limit, offset) => `SELECT * FROM (${sql.replace(/;\s*$/, "")}) AS _page LIMIT ${limit} OFFSET ${offset}`,
+  quoteIdent: (n) => `"${n}"`,
   query: async () => ({ columns: [], rows: [] }),
   execute: async () => ({ rowCount: 1 }), executeBatch: async () => [{ rowCount: 1 }],
   listSchemas: async () => [], listTables: async () => [], describeTable: async () => [],

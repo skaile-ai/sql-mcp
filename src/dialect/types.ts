@@ -38,6 +38,8 @@ export interface Dialect {
   close(): Promise<void>;
   /** Rewrite canonical `$1/$2` placeholders into the dialect-native form. */
   rewriteParams(canonicalSql: string): string;
+  /** Wrap a SELECT to fetch `limit` rows starting at `offset`, in dialect-native syntax. */
+  paginate(sql: string, limit: number, offset: number): string;
   /** Quote an identifier (caller has already allowlist-validated it). */
   quoteIdent(name: string): string;
   query(sql: string, params: unknown[]): Promise<QueryResult>;
