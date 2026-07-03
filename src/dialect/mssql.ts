@@ -14,9 +14,9 @@ export interface MssqlExecutor {
   close(): Promise<void>;
 }
 export type MssqlExecutorFactory = (dsn: string, opts: { readOnly: boolean; statementTimeoutMs: number }) => MssqlExecutor;
+export type MssqlTediousDriver = Pick<typeof import("tedious"), "Connection" | "Request">;
 
-const defaultFactory: MssqlExecutorFactory = (dsn, opts) => {
-  const { Connection, Request } = require("tedious") as typeof import("tedious");
+export const createMssqlExecutorFactory = ({ Connection, Request }: MssqlTediousDriver): MssqlExecutorFactory => (dsn, opts) => {
   const u = new URL(dsn);
   const config = {
     server: u.hostname,
@@ -35,16 +35,12 @@ const defaultFactory: MssqlExecutorFactory = (dsn, opts) => {
   };
 
   let conn: import("tedious").Connection | null = null;
-  const connected = new Promise<import("tedious").Connection>((resolve, reject) => {
-    const c = new Connection(config);
-    c.on("connect", (err) => (err ? reject(err) : resolve(c)));
-    c.connect();
-    conn = c;
-  });
+  let txConn: import("tedious").Connection | null = null;
 
   // A single tedious connection permits only one in-flight request. Serialize every TDS
-  // request (queries AND transaction-control) through a promise chain so concurrent MCP
-  // calls queue cleanly instead of hitting "another request is currently in progress".
+  // request (connection creation, queries, AND transaction-control) through a promise
+  // chain so concurrent MCP calls queue cleanly instead of hitting "another request is
+  // currently in progress".
   let chain: Promise<unknown> = Promise.resolve();
   const enqueue = <T>(op: () => Promise<T>): Promise<T> => {
     const result = chain.then(op, op);
@@ -52,12 +48,116 @@ const defaultFactory: MssqlExecutorFactory = (dsn, opts) => {
     return result;
   };
 
+  const normalizeError = (err: unknown, fallback: string): Error =>
+    err instanceof Error ? err : new Error(err == null ? fallback : String(err));
+
+  const discardConnection = (c: import("tedious").Connection, close: boolean): void => {
+    if (conn === c) conn = null;
+    if (close) {
+      try { c.close(); } catch { /* discard best-effort */ }
+    }
+  };
+  const isLoggedIn = (c: import("tedious").Connection): boolean => {
+    const stateName = (c as { state?: { name?: string } }).state?.name;
+    return stateName === "LoggedIn";
+  };
+
+  const openConnection = (): Promise<import("tedious").Connection> =>
+    new Promise<import("tedious").Connection>((resolve, reject) => {
+      const c = new Connection(config);
+      let settled = false;
+
+      const fail = (err: unknown, close = true): void => {
+        if (settled) return;
+        settled = true;
+        discardConnection(c, close);
+        reject(normalizeError(err, "CONNECTION_FAILED: mssql connection failed"));
+      };
+
+      c.on("connect", (err) => {
+        if (err) {
+          fail(err);
+          return;
+        }
+        if (conn !== c) {
+          fail(new Error("CONNECTION_FAILED: mssql connection closed while connecting"), true);
+          return;
+        }
+        settled = true;
+        resolve(c);
+      });
+      c.on("end", () => {
+        if (settled) {
+          discardConnection(c, false);
+        } else {
+          fail(new Error("CONNECTION_FAILED: mssql connection ended before connect completed"), false);
+        }
+      });
+      c.on("error", (err) => {
+        if (settled) {
+          discardConnection(c, true);
+        } else {
+          fail(err);
+        }
+      });
+
+      conn = c;
+      c.connect();
+    });
+
+  const getConnection = (): Promise<import("tedious").Connection> => {
+    if (conn) {
+      if (isLoggedIn(conn)) return Promise.resolve(conn);
+      discardConnection(conn, true);
+    }
+    return openConnection();
+  };
+  const getRequestConnection = (): Promise<import("tedious").Connection> => {
+    if (!txConn) return getConnection();
+    if (conn === txConn && isLoggedIn(txConn)) return Promise.resolve(txConn);
+    throw new Error("CONNECTION_FAILED: mssql transaction connection was lost");
+  };
+  const getTransactionControlConnection = async (): Promise<import("tedious").Connection> => {
+    if (!txConn) return getConnection();
+    if (conn === txConn && isLoggedIn(txConn)) return txConn;
+    txConn = null;
+    throw new Error("CONNECTION_FAILED: mssql transaction connection was lost");
+  };
+  const finishTransaction = (
+    c: import("tedious").Connection,
+    complete: (cb: (e?: Error | null) => void) => void,
+  ): Promise<void> =>
+    new Promise<void>((res, rej) => {
+      const done = (e?: Error | null): void => {
+        if (txConn === c) txConn = null;
+        if (e) {
+          if (isStaleConnectionError(e)) discardConnection(c, true);
+          rej(e);
+        } else {
+          res();
+        }
+      };
+      try {
+        complete(done);
+      } catch (e) {
+        done(normalizeError(e, "CONNECTION_FAILED: mssql transaction completion failed"));
+      }
+    });
+
+  const isStaleConnectionError = (err: Error): boolean =>
+    /not connected/i.test(err.message) || /Requests can only be made in the LoggedIn state/i.test(err.message);
+
   const runRaw = (c: import("tedious").Connection, sql: string, params: unknown[]) =>
     new Promise<{ rows: Record<string, unknown>[]; rowCount: number }>((resolve, reject) => {
       const rows: Record<string, unknown>[] = [];
-      const req = new Request(sql, (err, rowCount) =>
-        err ? reject(err) : resolve({ rows, rowCount: rowCount ?? rows.length }),
-      );
+      const req = new Request(sql, (err, rowCount) => {
+        if (err) {
+          if (isStaleConnectionError(err)) discardConnection(c, true);
+          reject(err);
+          return;
+        }
+        resolve({ rows, rowCount: rowCount ?? rows.length });
+      });
       params.forEach((val, i) => req.addParameter(`p${i + 1}`, inferTdsType(val), val ?? null));
       req.on("row", (columns: any[]) => {
         const row: Record<string, unknown> = {};
@@ -69,26 +169,49 @@ const defaultFactory: MssqlExecutorFactory = (dsn, opts) => {
 
   return {
     async run(sql, params) {
-      const c = await connected;
-      return enqueue(() => runRaw(c, sql, params));
+      return enqueue(async () => runRaw(await getRequestConnection(), sql, params));
     },
     async beginTransaction() {
-      const c = await connected;
-      return enqueue(() => new Promise<void>((res, rej) => c.beginTransaction((e?: Error | null) => (e ? rej(e) : res()))));
+      return enqueue(async () => {
+        const c = await getConnection();
+        return new Promise<void>((res, rej) =>
+          c.beginTransaction((e?: Error | null) => {
+            if (e) {
+              if (isStaleConnectionError(e)) discardConnection(c, true);
+              rej(e);
+            } else {
+              txConn = c;
+              res();
+            }
+          }),
+        );
+      });
     },
     async commit() {
-      const c = await connected;
-      return enqueue(() => new Promise<void>((res, rej) => c.commitTransaction((e?: Error | null) => (e ? rej(e) : res()))));
+      return enqueue(async () => {
+        const c = await getTransactionControlConnection();
+        return finishTransaction(c, (done) => c.commitTransaction(done));
+      });
     },
     async rollback() {
-      const c = await connected;
-      return enqueue(() => new Promise<void>((res, rej) => c.rollbackTransaction((e?: Error | null) => (e ? rej(e) : res()))));
+      return enqueue(async () => {
+        const c = await getTransactionControlConnection();
+        return finishTransaction(c, (done) => c.rollbackTransaction(done));
+      });
     },
     async close() {
-      conn?.close();
+      // Close remains outside the queue so shutdown can interrupt a connecting or in-flight socket;
+      // handlers above discard the same connection and reject queued work instead of reusing it.
+      const c = conn ?? txConn;
+      conn = null;
+      txConn = null;
+      c?.close();
     },
   };
 };
+
+const defaultFactory: MssqlExecutorFactory = (dsn, opts) =>
+  createMssqlExecutorFactory(require("tedious") as typeof import("tedious"))(dsn, opts);
 
 export class MssqlDialect implements Dialect {
   readonly name = "mssql" as const;
