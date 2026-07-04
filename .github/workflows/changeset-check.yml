@@ -1,0 +1,114 @@
+name: Changeset Check
+
+# Fails a PR that changes src/ without a changeset, so version bumps are never
+# silently skipped. For changes that need no release (docs/CI-only), add an
+# empty changeset with `bun run changeset --empty`.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    paths:
+      - "src/**"
+      - ".changeset/**"
+
+jobs:
+  changeset-check:
+    name: Check for changeset
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write # post/delete the "missing changeset" comment
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          fetch-depth: 0
+
+      - name: Fetch main
+        run: git fetch origin main:main
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: "1.3.11"
+
+      - run: bun install --frozen-lockfile
+
+      - name: Check for changeset
+        id: changeset-check
+        run: |
+          # Source changes that warrant a release.
+          CHANGED=$(git diff --name-only origin/main...HEAD -- src/ || true)
+
+          if [ -z "$CHANGED" ]; then
+            echo "No src/ changes detected"
+            echo "has_source_changes=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "has_source_changes=true" >> "$GITHUB_OUTPUT"
+
+          # Any changeset markdown (excluding README) added by this PR?
+          CHANGESET_FILES=$(git diff --name-only origin/main...HEAD -- .changeset/ | grep -E '\.md$' | grep -v 'README.md' || true)
+
+          if [ -z "$CHANGESET_FILES" ]; then
+            echo "::error::No changeset found! Run 'bun run changeset' to describe your changes (or 'bun run changeset --empty' if no release is needed)."
+            echo "has_changeset=false" >> "$GITHUB_OUTPUT"
+            exit 1
+          fi
+
+          echo "Changeset files found: $CHANGESET_FILES"
+          echo "has_changeset=true" >> "$GITHUB_OUTPUT"
+
+      - name: Changeset status
+        if: steps.changeset-check.outputs.has_source_changes == 'true'
+        run: bun run changeset status --since=main
+
+      # Posts the "missing changeset" comment when one is needed, and deletes it
+      # again once a changeset is added — so the warning never lingers. Runs even
+      # when the check step failed (hence always()).
+      - name: Manage missing-changeset comment
+        if: always() && steps.changeset-check.outputs.has_source_changes == 'true'
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            const marker = 'Missing Changeset';
+            const missing = '${{ steps.changeset-check.outputs.has_changeset }}' === 'false';
+            const body = `## ⚠️ Missing Changeset
+
+            This PR changes \`src/\` but doesn't include a changeset.
+
+            Run the following and commit the generated file:
+
+            \`\`\`bash
+            bun run changeset
+            \`\`\`
+
+            You'll be prompted to choose a bump level (patch / minor / major) and write a short summary.
+
+            If the change needs no release (docs/CI-only), add an empty changeset instead:
+
+            \`\`\`bash
+            bun run changeset --empty
+            \`\`\``;
+
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+            const existing = comments.find(c =>
+              c.user.login === 'github-actions[bot]' && c.body.includes(marker)
+            );
+
+            if (missing && !existing) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body,
+              });
+            } else if (!missing && existing) {
+              await github.rest.issues.deleteComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+              });
+            }
