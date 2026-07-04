@@ -69,17 +69,23 @@ jobs:
       # `changeset-release/main` branch with the bump already committed, so
       # `git diff HEAD~1 HEAD` would report a version bump on EVERY push.
       # `$GITHUB_SHA` is the real main tip regardless of the working tree.
+      #
+      # Compare the PARSED top-level version, not the diff text: grepping the
+      # diff for an added `"version":` line false-positives on any other line
+      # matching that key — e.g. the `"version": "changeset version"` script
+      # entry tripped it when this workflow itself landed (#11).
       - name: Detect version bump
         id: bump
         run: |
-          if git diff "${GITHUB_SHA}~1" "${GITHUB_SHA}" -- package.json | grep -qE '^\+\s*"version":'; then
-            VERSION=$(git show "${GITHUB_SHA}:package.json" | node -pe "JSON.parse(require('fs').readFileSync(0, 'utf8')).version")
+          OLD=$(git show "${GITHUB_SHA}~1:package.json" | node -pe "JSON.parse(require('fs').readFileSync(0, 'utf8')).version")
+          NEW=$(git show "${GITHUB_SHA}:package.json" | node -pe "JSON.parse(require('fs').readFileSync(0, 'utf8')).version")
+          if [ "$OLD" != "$NEW" ]; then
             echo "changed=true" >> "$GITHUB_OUTPUT"
-            echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-            echo "Release detected: $VERSION"
+            echo "version=$NEW" >> "$GITHUB_OUTPUT"
+            echo "Release detected: $OLD -> $NEW"
           else
             echo "changed=false" >> "$GITHUB_OUTPUT"
-            echo "No version change in this push"
+            echo "No version change in this push (still $NEW)"
           fi
 
       # Tag the merge commit and dispatch release.yml at that tag. The
