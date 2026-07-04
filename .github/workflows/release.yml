@@ -1,18 +1,20 @@
 name: Release
 
-# Tag-driven release. Push a `v*` tag (e.g. v0.1.0) to build the single-file
-# bundle and publish it as a GitHub Release. The release assets are what the
-# Skaile `ai-assets/mcp/sql` catalog entry consumes as an `upstream_pointer`:
+# Tag-driven release: builds the single-file bundle and publishes it as a
+# GitHub Release. The release assets are what the Skaile `ai-assets/mcp/sql`
+# catalog entry consumes as an `upstream_pointer`:
 #   - server.js     — the bundled MCP server (run by the baseline `node`)
 #   - manifest.json  — { file, sha256, version } for integrity-pinned install
 #
-# Adapted from the platform's changesets+Jenkins release: this repo ships a
-# standalone artifact rather than deploying a service, so the release model is
-# build-bundle → attach-to-GitHub-Release rather than a Version PR + deploy branch.
+# Normal path: merging the changesets "Version Packages" PR makes version.yml
+# tag the merge commit `v<version>` and dispatch this workflow at that tag
+# (workflow_dispatch, because GITHUB_TOKEN tag pushes can't trigger workflows).
+# Escape hatch: a manually pushed `v*` tag triggers it directly.
 on:
   push:
     tags:
       - "v*"
+  workflow_dispatch: # dispatched by version.yml at the release tag ref
 
 permissions:
   contents: write # create the release + upload assets
