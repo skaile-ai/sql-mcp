@@ -11,8 +11,12 @@ servers, this is a **pure Node/TypeScript** server bundled to a single file and 
 
 ## Status
 
-🚧 Design phase. See [`docs/specs/2026-06-16-sql-mcp-design.md`](docs/specs/2026-06-16-sql-mcp-design.md)
-for the full design. Implementation has not started.
+✅ Implemented and in active use. All four engine adapters (SQLite, PostgreSQL, MySQL, MSSQL) are
+shipped, with unit and integration test suites. See
+[`docs/specs/2026-06-16-sql-mcp-design.md`](docs/specs/2026-06-16-sql-mcp-design.md) for the
+original design and
+[`docs/specs/2026-06-17-mcp-release-asset-delivery-design.md`](docs/specs/2026-06-17-mcp-release-asset-delivery-design.md)
+for how the bundled server is delivered.
 
 ## At a glance
 
@@ -20,7 +24,7 @@ for the full design. Implementation has not started.
 - **One connection per server instance**, selected by `SQL_MCP_DIALECT` + `SQL_MCP_DSN`.
 - **Access scope per instance:** `readonly` / `dml` / `full` (`SQL_MCP_ACCESS`).
 - **Tools:** `sql.capabilities`, `sql.list_schemas`, `sql.list_tables`, `sql.describe_table`,
-  `sql.query`, `sql.execute`, `sql.execute_ddl`, `sql.begin` / `commit` / `rollback`.
+  `sql.query`, `sql.execute`, `sql.execute_batch` (atomic multi-statement DML), `sql.execute_ddl`.
 - **Safety:** defense-in-depth access enforcement (tool-gating + SQL statement classification +
   DB-level read-only transactions), mandatory parameterization, row/byte/time limits.
 
